@@ -17,7 +17,7 @@ cargo build --locked --bin cu-agent
 printf '%s\n' '{"id":"check","method":"describe"}' | target/debug/cu-agent
 ```
 
-`describe` 回報目前支援的方法、欄位與結束碼。完整說明見 [docs/AGENT-CLI.md](docs/AGENT-CLI.md)。helper 路徑與輸出路徑必須使用呼叫者環境中的絕對路徑。MCP 包裝尚未提供（見 issue #6）。
+`describe` 回報目前支援的方法、欄位與結束碼。完整說明見 [docs/AGENT-CLI.md](docs/AGENT-CLI.md)。helper 路徑與輸出路徑必須使用呼叫者環境中的絕對路徑。MCP 包裝尚未提供（見 issue #3）。
 
 ## 現況
 

@@ -64,3 +64,16 @@ fn readme_states_agent_neutrality() {
         assert!(readme.contains(needle), "README.md lacks {needle:?}");
     }
 }
+
+#[test]
+fn readme_points_mcp_wrapper_at_the_agent_interface_issue() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(
+        readme.contains("MCP 包裝尚未提供（見 issue #3）"),
+        "README.md should point the MCP wrapper note at issue #3"
+    );
+    assert!(
+        !readme.contains("見 issue #6"),
+        "README.md still points at the stale issue #6"
+    );
+}
