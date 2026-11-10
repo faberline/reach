@@ -1,0 +1,9 @@
+[package]
+name = "mac-computer-use"
+version = "0.1.0"
+edition = "2021"
+default-run = "mac-computer-use"
+
+[dependencies]
+serde = "1"
+serde_json = "1"

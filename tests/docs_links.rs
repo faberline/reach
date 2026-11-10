@@ -1,0 +1,66 @@
+//! Documentation must stand alone: relative links resolve, and the README
+//! states what Reach is and is not. Offline.
+use std::{fs, path::PathBuf};
+
+fn root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn markdown_files() -> Vec<PathBuf> {
+    let mut files = vec![root().join("README.md")];
+    for entry in fs::read_dir(root().join("docs")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// Targets of `](target)` links in `text`.
+fn link_targets(text: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("](") {
+        rest = &rest[start + 2..];
+        if let Some(end) = rest.find(')') {
+            targets.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+    }
+    targets
+}
+
+#[test]
+fn relative_markdown_links_resolve() {
+    let mut broken = Vec::new();
+    for file in markdown_files() {
+        let text = fs::read_to_string(&file).unwrap();
+        for target in link_targets(&text) {
+            if target.starts_with("http") || target.starts_with('#') || target.is_empty() {
+                continue;
+            }
+            let path_part = target.split('#').next().unwrap();
+            let resolved = file.parent().unwrap().join(path_part);
+            if !resolved.exists() {
+                broken.push(format!("{}: {target}", file.display()));
+            }
+        }
+    }
+    assert!(broken.is_empty(), "broken links:\n{}", broken.join("\n"));
+}
+
+#[test]
+fn readme_states_agent_neutrality() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    for needle in [
+        "與 agent 無關",
+        "docs/AGENT-CLI.md",
+        "describe",
+        "未驗證",
+        "目前只支援 macOS",
+        "virtual_input",
+    ] {
+        assert!(readme.contains(needle), "README.md lacks {needle:?}");
+    }
+}
