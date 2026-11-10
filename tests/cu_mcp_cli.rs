@@ -27,8 +27,14 @@ fn never_allowed(v: &Value) {
 
 /// Run `cu-mcp --cu-agent <cu-agent>` with the given request lines and parse each reply line.
 fn session(lines: &[String]) -> Vec<Value> {
+    session_with(&[], lines)
+}
+
+/// Like `session`, with `--helper <field>=<path>` for each entry of `helpers`.
+fn session_with(helpers: &[&str], lines: &[String]) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_cu-mcp"))
         .args(["--cu-agent", env!("CARGO_BIN_EXE_cu-agent")])
+        .args(helpers.iter().flat_map(|h| ["--helper", h]))
         .env(SOCKET.0, SOCKET.1)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -84,14 +90,40 @@ fn direct_describe() -> Value {
     v
 }
 
-/// Every field name a method declares, in any of its three lists.
+/// A field that `cu-agent` would execute as a program.
+fn executable(field: &str) -> bool {
+    field.ends_with("_helper") || field == "adapter" || field == "adapters"
+}
+
+/// Every field name a method declares, in any of its three lists, without the executable paths.
 fn field_union(entry: &Value) -> BTreeSet<String> {
     ["fields", "agent_fields", "agent_optional_fields"]
         .iter()
         .filter_map(|key| entry[*key].as_array())
         .flatten()
         .map(|v| v.as_str().unwrap().to_string())
+        .filter(|f| !executable(f))
         .collect()
+}
+
+/// The executable-path fields of one method.
+fn executable_fields(entry: &Value) -> Vec<&str> {
+    entry["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .filter(|f| executable(f))
+        .collect()
+}
+
+fn list_tools(helpers: &[&str]) -> Vec<Value> {
+    let replies = session_with(
+        helpers,
+        &[r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.to_string()],
+    );
+    assert_eq!(replies.len(), 1);
+    replies[0]["result"]["tools"].as_array().unwrap().clone()
 }
 
 #[test]
@@ -108,10 +140,16 @@ fn tools_match_the_describe_of_the_real_cu_agent() {
     let tools = replies[1]["result"]["tools"].as_array().unwrap();
     let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     names.sort();
-    let mut expected: Vec<&str> = methods.keys().map(String::as_str).collect();
+    // No helper was fixed: only methods that need none, or that ReachAgent can serve, are offered.
+    let mut expected: Vec<&str> = methods
+        .iter()
+        .filter(|(_, e)| executable_fields(e).is_empty() || e.get("agent_fields").is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
     expected.sort();
     assert_eq!(names, expected);
     assert!(names.contains(&"action") && names.contains(&"describe"));
+    assert!(names.contains(&"capture") && !names.contains(&"recognize_text"));
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         let props: BTreeSet<String> = tool["inputSchema"]["properties"]
@@ -122,6 +160,94 @@ fn tools_match_the_describe_of_the_real_cu_agent() {
             .collect();
         assert_eq!(props, field_union(&methods[name]), "{name}");
     }
+}
+
+#[test]
+fn every_method_is_offered_once_its_helpers_are_fixed() {
+    let describe = direct_describe();
+    let methods = describe["result"]["methods"].as_object().unwrap();
+    let mut fields: BTreeSet<&str> = methods.values().flat_map(executable_fields).collect();
+    assert!(fields.contains("ax_helper") && fields.contains("adapters"));
+    let helpers: Vec<String> = fields
+        .iter()
+        .map(|f| format!("{f}=/nonexistent/reach-{f}"))
+        .collect();
+    let helpers: Vec<&str> = helpers.iter().map(String::as_str).collect();
+    let tools = list_tools(&helpers);
+    let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, methods.keys().map(String::as_str).collect());
+    for tool in &tools {
+        let name = tool["name"].as_str().unwrap();
+        let schema = &tool["inputSchema"];
+        let props: BTreeSet<String> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(props, field_union(&methods[name]), "{name}");
+        for required in schema["required"].as_array().unwrap() {
+            assert!(!executable(required.as_str().unwrap()), "{name}");
+        }
+    }
+
+    // One helper less: exactly the methods that need it, and have no ReachAgent route, disappear.
+    fields.remove("ax_helper");
+    let helpers: Vec<String> = fields
+        .iter()
+        .map(|f| format!("{f}=/nonexistent/reach-{f}"))
+        .collect();
+    let helpers: Vec<&str> = helpers.iter().map(String::as_str).collect();
+    let fewer = list_tools(&helpers);
+    let names: BTreeSet<&str> = fewer.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(!names.contains("find_bundle") && !names.contains("observe_window"));
+    assert!(names.contains("accessibility") && names.contains("recognize_text"));
+}
+
+#[test]
+fn a_tool_argument_cannot_name_an_executable() {
+    let image = "/nonexistent/reach-image.png";
+    let asked = [
+        call(
+            1,
+            "recognize_text",
+            json!({"image": image, "ocr_helper": "/bin/sh"}),
+        ),
+        call(2, "recognize_text", json!({"image": image})),
+        call(
+            3,
+            "recognize_image",
+            json!({"image": image, "adapter": "/bin/sh"}),
+        ),
+        call(4, "windows", json!({"pid": 1, "ax_helper": "/bin/sh"})),
+    ];
+
+    // Without a fixed helper the argument is refused and the method is not run.
+    let replies = session(&asked);
+    assert_eq!(replies.len(), 4);
+    for i in [0, 2, 3] {
+        assert_eq!(replies[i]["error"]["code"], -32602, "{i}");
+    }
+    let s = &replies[1]["result"]["structuredContent"];
+    assert_eq!(s["status"], "wrapper_error");
+    assert!(s["reason"].as_str().unwrap().contains("ocr_helper"));
+    assert!(s["reply"].is_null());
+
+    // With a fixed helper the argument is still refused; the method runs with the fixed path.
+    // The path does not exist, so `cu-agent` reports an error and nothing is executed.
+    let replies = session_with(&["ocr_helper=/nonexistent/reach-ocr-helper"], &asked);
+    assert_eq!(replies.len(), 4);
+    for i in [0, 2, 3] {
+        assert_eq!(replies[i]["error"]["code"], -32602, "{i}");
+    }
+    let s = &replies[1]["result"]["structuredContent"];
+    assert_eq!(s["status"], "error");
+    assert_eq!(s["reply"]["id"], "mcp-1");
+    assert_eq!(s["reply"]["method"], "recognize_text");
+    assert_ne!(
+        s["reply"]["result"]["reason"],
+        "missing or unexpected request fields"
+    );
 }
 
 #[test]
@@ -200,4 +326,27 @@ fn bad_arguments_exit_2_without_output() {
         .unwrap();
     assert_eq!(relative.status.code(), Some(2));
     assert!(relative.stdout.is_empty());
+
+    let bad_helpers: [&[&str]; 5] = [
+        &["--helper"],
+        &["--helper", "ax_helper=relative/ax"],
+        &["--helper", "image=/nonexistent/a.png"],
+        &["--ax-helper", "/nonexistent/ax"],
+        &[
+            "--helper",
+            "ax_helper=/nonexistent/a",
+            "--helper",
+            "ax_helper=/nonexistent/b",
+        ],
+    ];
+    for extra in bad_helpers {
+        let out = Command::new(env!("CARGO_BIN_EXE_cu-mcp"))
+            .args(["--cu-agent", env!("CARGO_BIN_EXE_cu-agent")])
+            .args(extra)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{extra:?}");
+        assert!(out.stdout.is_empty(), "{extra:?}");
+    }
 }
