@@ -1,4 +1,4 @@
-// Accessibility snapshots for the ReachAgent service (issue #39). It is compiled together with
+// Accessibility snapshots for the ReachAgent service (faberline/reach-old#39). It is compiled together with
 // ReachAgent.swift. Read-only AX: no input events, no actions, no foreground change.
 // It never asks for a permission: the service pre-flights `accessibility` before it calls a
 // backend, so a backend runs only when the permission is already granted.
@@ -296,7 +296,7 @@ private func axSnapshot(pid: pid_t, windowsOnly: Bool = false) throws -> [String
 // MARK: - System backend
 
 /// Reads the real AX tree. Real-machine behavior is not verified yet: it needs the Accessibility
-/// grant of the signed ReachAgent.app (issues #16 and #21).
+/// grant of the signed ReachAgent.app (issues #5 and #6).
 struct SystemAccessibilityBackend: AccessibilityBackend {
     func snapshot(pid: Int32, windowsOnly: Bool) throws -> [String: Any] {
         do { return try axSnapshot(pid: pid, windowsOnly: windowsOnly) }

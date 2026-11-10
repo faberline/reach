@@ -93,7 +93,7 @@ printf '%s\n' '{"id":"cap-1","method":"capture","pid":12345,"window_id":678,"ima
 - 狀態：`accessibility` 成功為 `ok`、狀態碼 0；`capture`、`capture_all_windows`、`accessibility_subtree` 成功為 `unknown`、狀態碼 3（視窗綁定與內容仍未驗證）；App 回報錯誤（例如 `permission_denied`）為 `error`、狀態碼 1，`result.agent_error` 帶 `code`、`message` 與（若有）`permission`、`state`。
 - App 沒有執行：回報 `agent_unavailable`、狀態碼 3，`result` 有 `reason`、`socket`、`start` 與 `fallback: "none"`。`start` 是給人看的啟動指令，形如 `open -a ReachAgent --args --serve --socket <路徑>`；Reach 不會自己啟動 App，也**不會**退回 helper 路徑或使用 terminal 的權限。
 - `describe` 的 `agent` 欄位回報 App 狀態：`running`（含 `app_version`、`protocol_version`、`test_mode` 與三種權限）、`unavailable` 或 `error`。它只呼叫 App 的 `describe` 與 `permissions`，不要求任何權限。
-- 真機行為尚未驗證：需要使用者建立憑證並授予權限（issue #16、#21）。目前只有假 socket 的離線測試。
+- 真機行為尚未驗證：需要使用者建立憑證並授予權限（issue #5、#6）。目前只有假 socket 的離線測試。
 
 呼叫者提供的 helper 路徑會被執行；只可使用受信任的執行檔。此 CLI 不驗證執行檔來源或雜湊，也不能防止它們被替換。它不證明目標沒有遮擋、座標已校準，或輸入不會影響游標與焦點。安全背景輸入未驗證前，不得將回覆轉成點擊或按鍵。
 

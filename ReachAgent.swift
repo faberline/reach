@@ -2,7 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-// ReachAgent service (issues #33, #35 and #39). It listens on a Unix domain socket and speaks the
+// ReachAgent service (faberline/reach-old#33, faberline/reach-old#35 and faberline/reach-old#39). It listens on a Unix domain socket and speaks the
 // line-based JSON protocol described in docs/AGENT-SERVICE.md. Window capture lives in
 // ReachAgentCapture.swift and runs only when `screen_recording` is granted. Accessibility
 // snapshots live in ReachAgentAccessibility.swift and run only when `accessibility` is granted.

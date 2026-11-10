@@ -44,7 +44,7 @@ fn window_identity_doc_matches_evidence_fields() {
         "座標有限",
         "寬高為正",
         "計算重複候選之前",
-        "#16",
+        "issue #5「多 App 視窗擷取實測",
         "不會留下新的 sidecar",
         "stream_status",
         "沒有 `title`",

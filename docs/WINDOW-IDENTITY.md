@@ -41,7 +41,7 @@ sidecar 是 `<圖片檔名>.json`（例如圖片 `new.png` 的 sidecar 是 `new.
 - **非原子**：程序身分、視窗盤點、擷取、再盤點、再取身分是依序執行的；兩次相同也不能排除中間的變動。
 - **螢幕比例**：圖片像素尺寸與視窗點數的比例（例如 Retina 的 2 倍）只是觀察到的數字，不是座標校準，不能拿來換算點擊位置。
 
-座標與 AX 綁定的研究屬於 issue #3，輸入屬於 issue #5。
+座標與 AX 綁定的研究屬於 issue #1，輸入屬於 issue #2。
 
 ## 實測程序（唯讀）
 
@@ -59,4 +59,4 @@ sidecar 是 `<圖片檔名>.json`（例如圖片 `new.png` 的 sidecar 是 `new.
 
 ### 實測紀錄
 
-**2026-11-09（macOS，從 agent 的 shell 執行）**：未能實測。直接呼叫擷取器 `target/debug/mac-window-capture 999999999 1 <暫存路徑>.png`（不存在的視窗，僅用來探測權限）回報 `capture failed: screen recording permission is not granted`，結束碼 77，沒有產生圖片，也沒有跳出授權視窗。因此「兩個不同 App 的實機擷取」尚未完成，由 issue #16「多 App 視窗擷取實測（#2 的實機驗證）」追蹤。上述各項負面案例（重複候選、不可見、無效幾何、程序重啟、視窗改變、metadata 不符等）由離線測試涵蓋，見 `src/lib.rs` 的 `mod tests`。
+**2026-11-09（macOS，從 agent 的 shell 執行）**：未能實測。直接呼叫擷取器 `target/debug/mac-window-capture 999999999 1 <暫存路徑>.png`（不存在的視窗，僅用來探測權限）回報 `capture failed: screen recording permission is not granted`，結束碼 77，沒有產生圖片，也沒有跳出授權視窗。因此「兩個不同 App 的實機擷取」尚未完成，由 issue #5「多 App 視窗擷取實測（faberline/reach-old#2 的實機驗證）」追蹤。上述各項負面案例（重複候選、不可見、無效幾何、程序重啟、視窗改變、metadata 不符等）由離線測試涵蓋，見 `src/lib.rs` 的 `mod tests`。
