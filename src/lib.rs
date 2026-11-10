@@ -38,6 +38,7 @@ pub mod input_guard;
 pub mod interpretation;
 pub mod joint_observation;
 pub mod live_ax_cg;
+pub mod mcp_server;
 pub mod native_event_preview;
 pub mod overlay_session;
 pub mod platform;

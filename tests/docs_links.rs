@@ -51,6 +51,38 @@ fn relative_markdown_links_resolve() {
 }
 
 #[test]
+fn readme_links_the_mcp_wrapper_doc() {
+    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+    assert!(
+        readme.contains("docs/MCP.md"),
+        "README.md must link docs/MCP.md"
+    );
+    assert!(
+        !readme.contains("MCP 包裝尚未提供"),
+        "README.md still says the MCP wrapper is missing"
+    );
+}
+
+#[test]
+fn mcp_doc_states_the_evaluation() {
+    let doc = fs::read_to_string(root().join("docs/MCP.md")).expect("docs/MCP.md");
+    for needle in [
+        "2025-06-18",
+        "stdio",
+        "--cu-agent",
+        "<REACH_DIR>",
+        "mcpServers",
+        "needs_agent",
+        "action_allowed",
+        "wrapper_error",
+        "不支援",
+        "65,536",
+    ] {
+        assert!(doc.contains(needle), "docs/MCP.md lacks {needle:?}");
+    }
+}
+
+#[test]
 fn readme_states_agent_neutrality() {
     let readme = fs::read_to_string(root().join("README.md")).unwrap();
     for needle in [
