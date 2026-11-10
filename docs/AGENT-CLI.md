@@ -2,7 +2,7 @@
 
 本介面不屬於任何特定 agent；任何能啟動程序並讀寫 JSON 的程式都能使用。文中 `<REACH_DIR>` 代表本儲存庫在呼叫者環境中的絕對路徑；helper 路徑與輸出路徑必須使用呼叫者目前環境中的絕對路徑。
 
-`cu-agent` 接收一筆 JSON，執行一次呼叫，再輸出一筆 JSON。它可供 Agent 直接使用，或由未來的 MCP server 包裝；目前不是 MCP server。它支援唯讀觀察與保存擷取證據，不發送輸入。
+`cu-agent` 接收一筆 JSON，執行一次呼叫，再輸出一筆 JSON。它可供 Agent 直接使用，或經由 [MCP stdio 包裝](MCP.md) 使用；`cu-agent` 本身不是 MCP server。它支援唯讀觀察與保存擷取證據，不發送輸入。
 
 ```sh
 cd <REACH_DIR>

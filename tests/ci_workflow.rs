@@ -15,9 +15,10 @@ const LINUX_TESTS: [&str; 11] = [
     "virtual_input",
     "window_identity_docs",
 ];
-const MACOS_ONLY_TESTS: [&str; 7] = [
+const MACOS_ONLY_TESTS: [&str; 8] = [
     "cli",
     "cu_agent_cli",
+    "cu_mcp_cli",
     "focus_watch_cli",
     "headless_check_cli",
     "hidden_appkit_check_cli",
