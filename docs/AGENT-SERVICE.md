@@ -2,7 +2,7 @@
 
 ReachAgent 是 reach 之後要用固定身分的 App 執行的小服務。需要系統權限的動作（螢幕錄製、輔助使用）交給它，這樣權限算在 App 上，而不是算在 terminal 或 agent 的 shell 上（背景見 [BUILD.md](BUILD.md) 的「權限與簽章」）。
 
-目前有協定、服務骨架（issue #33）、視窗擷取（#35）與無障礙快照（#39）：App 包裝與簽章是 #34；`cu-agent` 的路由（不帶 helper 欄位的 `capture`、`capture_all_windows`、`accessibility`、`accessibility_subtree` 改走本服務）見 [AGENT-CLI.md](AGENT-CLI.md)。服務不送任何輸入事件，啟動時也不會要求任何權限；只有對應權限已是 `granted` 時，`capture` 與 `capture_all_windows` 才會擷取指定的單一視窗，`accessibility` 與 `accessibility_subtree` 才會讀取指定行程的無障礙樹（唯讀）。
+目前有協定、服務骨架（faberline/reach-old#33）、視窗擷取（faberline/reach-old#35）與無障礙快照（faberline/reach-old#39）：App 包裝與簽章是 faberline/reach-old#34；`cu-agent` 的路由（不帶 helper 欄位的 `capture`、`capture_all_windows`、`accessibility`、`accessibility_subtree` 改走本服務）見 [AGENT-CLI.md](AGENT-CLI.md)。服務不送任何輸入事件，啟動時也不會要求任何權限；只有對應權限已是 `granted` 時，`capture` 與 `capture_all_windows` 才會擷取指定的單一視窗，`accessibility` 與 `accessibility_subtree` 才會讀取指定行程的無障礙樹（唯讀）。
 
 ## 啟動與自我測試
 
@@ -47,7 +47,7 @@ target/debug/ReachAgent --self-test
 | `accessibility` | `{"pid":<整數>,"windows_only":<布林，可省略>}` | 行程的 AX 視窗快照（見下） |
 | `accessibility_subtree` | `{"pid":<整數>,"source":"main"、"focused" 或 "windows","path":[<整數>,…]}` | 單一子樹的快照（見下） |
 
-只有明確呼叫 `request_permissions` 才會向系統要求權限。`post_event` 不能要求（輸入維持停用，見 issue #5），含它的請求回 `not_requestable`。
+只有明確呼叫 `request_permissions` 才會向系統要求權限。`post_event` 不能要求（輸入維持停用，見 issue #2），含它的請求回 `not_requestable`。
 
 ### 擷取
 
@@ -56,7 +56,7 @@ target/debug/ReachAgent --self-test
 - 只擷取 `pid` 與 `window_id` 都符合且唯一的視窗（`SCContentFilter(desktopIndependentWindow:)`），不擷取整個螢幕。擷取前後會比對視窗幾何與是否在螢幕上，不符就失敗。
 - PNG 以排他方式建立（權限 0600，不覆寫既有檔案，不跟隨符號連結）。寫入失敗時服務會移除半成品；其他失敗之後該路徑是否留有檔案，呼叫端要自己檢查，服務不重試。整個擷取最多 30 秒，逾時回 `capture_failed`，並取消擷取工作（寫檔前會檢查取消，但已開始寫檔的那一刻無法中止）。
 - result 欄位：`window_id`、`owner_pid`、`window_frame_points`、`filter_content_rect_points`（`x`、`y`、`width`、`height`）、`point_pixel_scale`、`image_width`、`image_height`、`capture_start_uptime_ns`、`capture_end_uptime_ns`、`capture_end_unix_seconds`、`image_path`、`capture_type`（`desktop_independent_window`）、`window_scope`、`onscreen_before`、`onscreen_after`、`occlusion_checked`（固定 `false`，沒有檢查遮擋）。欄位與舊的單張擷取 helper 相同，不含 `image_sha256`：`cu-agent` 轉發時會讀取該 PNG 計算並加入雜湊，證據檔仍由呼叫端保存。Rust 端的 `check_capture_result` 核對結果與請求一致。
-- 真機擷取（`SystemCaptureBackend` 實際運作）尚未驗證：需要使用者建立憑證並授予螢幕錄製（issue #16、#21）。目前只有假後端的離線測試。
+- 真機擷取（`SystemCaptureBackend` 實際運作）尚未驗證：需要使用者建立憑證並授予螢幕錄製（issue #5、#6）。目前只有假後端的離線測試。
 
 ### 無障礙快照
 
@@ -68,7 +68,7 @@ target/debug/ReachAgent --self-test
 - 後端失敗（行程不存在或已改變、AX 視窗讀不到、子樹路徑無效等）回 `ax_failed`，`message` 為 `<狀態碼>: <原因>`，例如 `process_unavailable: …`。
 - 每次呼叫都重新讀取無障礙樹，不保證兩次呼叫之間同一個 `path` 指向同一個元素。結果只是唯讀的觀察，不授權任何操作。
 - Rust 端的 `check_accessibility_result` 與 `check_subtree_result` 核對結果與請求一致。
-- 真機無障礙讀取（`SystemAccessibilityBackend` 實際運作）尚未驗證：需要使用者建立憑證並授予輔助使用（issue #16、#21）。目前只有假後端的離線測試，也尚未驗證主執行緒阻塞在 accept 時 AX 讀取的行為。
+- 真機無障礙讀取（`SystemAccessibilityBackend` 實際運作）尚未驗證：需要使用者建立憑證並授予輔助使用（issue #5、#6）。目前只有假後端的離線測試，也尚未驗證主執行緒阻塞在 accept 時 AX 讀取的行為。
 
 ## 錯誤碼
 

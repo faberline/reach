@@ -1,4 +1,4 @@
-// Window capture for the ReachAgent service (issue #35). It is compiled together with
+// Window capture for the ReachAgent service (faberline/reach-old#35). It is compiled together with
 // ReachAgent.swift. Read-only ScreenCaptureKit: no input events, no foreground change.
 // It never asks for a permission: the service pre-flights `screen_recording` before it calls
 // a backend, so a backend runs only when the permission is already granted.
