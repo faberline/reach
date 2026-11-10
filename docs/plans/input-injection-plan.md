@@ -15,9 +15,11 @@
 
 ## 1. surface #96、#97 實際需要的輸入
 
-以下由兩個 issue 的內文推得。Surface 還沒給確切序列，缺的標為「待 Surface 確認」。
+序列來源：2026-11-10 surface-service-desk 提供，與本計畫先前由 issue 內文推得的一致。**這份序列是對方從 issue 內文整理的，沒有人實際跑過**；其中關於 canvas 的敘述是對方對程式現況的解讀。仍缺的項目列在 1.4。
 
-共同前置（不是輸入動作）：macOS、輸入來源 `com.apple.inputmethod.TCIM.Zhuyin`、showcase dev build（`main`，#94／#95 之後）、WebGPU 可用。showcase 把 UI 畫在 canvas 上，文字輸入經由一個隱藏的 textarea（`#surface-text-input`）；頁面另有 `#status` 文字（形如 `count=…;name=…;focused=…`）。這是唯讀查看 surface 程式得到的，需 Surface 確認仍然成立。
+共同前置（不是輸入動作）：macOS、輸入來源 `com.apple.inputmethod.TCIM.Zhuyin`、showcase 用 surface `main` 的 dev build 在本機提供（`cargo xtask web dev showcase`，預設 `http://127.0.0.1:8080`）、WebGPU 啟用。UI 畫在單一 `<canvas>` 上，「Your name」與「Add one」不是 DOM 元素，Surface 還沒有瀏覽器無障礙樹（faberline/surface#54）；所以點擊只能用 canvas 內的座標，位置靠擷取或 OCR 找。另由唯讀查看 surface 程式得知：文字輸入經由一個隱藏的 textarea（`#surface-text-input`），頁面有 `#status` 文字（形如 `count=…;name=…;focused=…`）；這兩點 Surface 尚未確認。
+
+瀏覽器範圍：#96 只測 Safari；#97 先 Safari，再 Chrome。兩者都不需要選候選字，也不需要按 Return 送出。
 
 ### 1.1 surface #96（組字中點擊）
 
@@ -36,28 +38,41 @@
 | 1 | 左鍵單擊「Your name」欄位 | canvas 內座標 | |
 | 2 | 依序敲 `5`、`j`、`/` | 鍵碼 23、38、44（ㄓㄨㄥ） | |
 | 3 | 敲空白鍵兩次 | 鍵碼 49 ×2 | 第一次定聲調，第二次開候選窗 |
-| 4 | （第三項驗收）組字中按視窗綠色按鈕改變大小 | 標題列按鈕座標 | 見下方待確認 |
-| 5 | （第二項驗收）重新載入頁面後重做 1–3 | 見下方待確認 | |
 
-驗收需要讀回：候選窗視窗邊界、caret 的螢幕矩形（候選窗頂端須在 caret 底端之下，容許 2 px），以及瀏覽器、OS、輸入來源。第四項驗收是 Chrome 同步驟無退化。
+步驟 3 之後不選字。Safari 要做三種情況，然後 Chrome 重複同樣步驟確認沒有退步：
+
+| 情況 | 內容 | 額外動作 |
+|---|---|---|
+| (a) | 一般 | 無 |
+| (b) | 頁面重新載入後的第一個候選窗 | 重新載入頁面（誰做見 S5） |
+| (c) | 組字中按綠色視窗按鈕調整大小之後 | 單擊標題列綠色按鈕（語意見 S4） |
+
+驗收需要讀回：候選窗視窗邊界（它是獨立的系統視窗，不屬於瀏覽器）、caret 的螢幕矩形（候選窗上緣須在 caret 下緣之下，容許 2 px），以及瀏覽器、OS、輸入來源。
 
 ### 1.3 所需動作的最小集合
 
 1. 指標移動到視窗內一點（不按鍵）。
 2. 左鍵單擊（同一點按下後立即放開）。
-3. 單鍵敲擊：按下後立即放開，無修飾鍵。需要的鍵碼只有 18、23、38、44、49；清理用可能再加 Escape（53）或 Return（36）。
+3. 單鍵敲擊：按下後立即放開，無修飾鍵。需要的鍵碼只有 18、23、38、44、49。序列本身不需要 Return；清理殘留組字若要用 Escape（53），須另列入鍵碼清單（見 S6）。
 
-**不需要**：拖曳、右鍵、捲動、修飾鍵組合、直接插入 Unicode 文字。issue 的步驟也沒有要求「選候選字」；只要求候選窗開出來並量位置。
+**不需要**：拖曳、右鍵、捲動、修飾鍵組合、直接插入 Unicode 文字、選候選字、按 Return 送出。
 
-### 1.4 待 Surface 確認
+除了輸入，重測還需要三個唯讀能力：擷取瀏覽器視窗找出 canvas 內目標的位置；讀取輸入法候選窗（獨立系統視窗）的邊界；由擷取或其他唯讀方式取得 caret 的螢幕矩形。
 
-- S1：兩個可點目標在 canvas 內的位置由誰提供。canvas 內的控制項不在無障礙樹裡，reach 不能用 AX 找它們。選項：Surface 在頁面的 DOM 文字裡輸出控制項邊界（reach 經 AX 唯讀讀取），或由呼叫端 agent 從截圖判讀。
-- S2：`isTrusted`、計數、`focused` 怎麼讀回。建議 Surface 把它們寫進 `#status` 之類的 DOM 文字，reach 以 AX 或截圖＋OCR 讀取；reach 不執行頁面 JavaScript。
-- S3：caret 的螢幕矩形由誰量。候選做法：隱藏 textarea 在 #95 之後是 caret 大小，它在 Safari 無障礙樹的框可能就是 caret 矩形（推論，未驗證）；或由 Surface 在頁面輸出。
-- S4：「綠色按鈕改變大小」是進入全螢幕（預設點擊）還是縮放（Option＋點擊）。後者需要修飾鍵，不在最小集合內；全螢幕會換 Space，目標身分與校準都要重來。
-- S5：「fresh page load」由誰重新載入。Cmd＋R 需要修飾鍵。建議第一版由在場的使用者手動重新載入，或靠 dev server 自動重載。
-- S6：每次重測後怎麼清掉殘留的組字（Escape、Return，或重新載入）。
-- S7：Chrome（#97 第四項）是否在這次範圍內，以及 showcase 的網址（預期是本機 dev server）。
+### 1.4 Surface 的答覆與仍待確認的項目
+
+已由 surface-service-desk 答覆（2026-11-10，未實跑）：
+
+- S1（已答）：目標位置沒有 AX 可用，靠擷取或 OCR 在 canvas 內找。reach 提供擷取與 OCR；判讀哪個像素是「Add one」是呼叫端 agent 的工作，reach 不放 surface 專用邏輯。
+- S7（已答）：#96 只測 Safari；#97 先 Safari 再 Chrome。網址預設 `http://127.0.0.1:8080`。Chrome 因此在重測範圍內，但加入允許清單仍需使用者核准（Q4）。
+
+仍待確認：
+
+- S2：`isTrusted` 怎麼讀回。Surface 表示需要頁面 console 或 debug 讀數。reach 不能讀瀏覽器 console，也不執行頁面 JavaScript；需要 Surface 把它顯示在畫面上（canvas 或 `#status` 之類的可見文字），reach 才能用擷取＋OCR 或 AX 讀到。計數與 `focused` 同理，需確認現有狀態顯示在畫面上看得到。
+- S3：caret 的螢幕矩形怎麼量。Surface 的說法是由擷取畫面取得；caret 很細且會閃爍，從截圖量到 2 px 精度是否可靠待實驗。備案：隱藏 textarea 在 #95 之後是 caret 大小，它在瀏覽器無障礙樹的框可能就是 caret 矩形（推論，未驗證）；或由 Surface 在畫面上輸出數值。
+- S4：「綠色按鈕調整大小」是進入全螢幕（預設單擊）還是縮放（Option＋單擊，或按住後選單）。Surface 的答覆沒有說明。全螢幕會換 Space，目標身分與校準都要重來；Option＋單擊需要修飾鍵，不在最小集合內。
+- S5：情況 (b) 的重新載入由誰做。Cmd＋R 需要修飾鍵。建議第一版由在場的使用者手動重新載入。
+- S6：每次重測後怎麼清掉殘留的組字（Escape，或重新載入頁面）。
 - S8：Surface 端由誰驅動：呼叫 `cu-agent` 的 agent session，還是腳本。這影響一次一事件的節奏是否夠用。
 
 ## 2. 前景輸入與背景輸入的取捨
@@ -111,7 +126,7 @@ reach#2 的文字要求「不得使用全域滑鼠事件、前景備援或自動
 | G1 明確啟用 | 預設停用。ReachAgent 必須由使用者以明確參數啟動（例如 `--enable-input --allow-bundle <id>`，可重複），並有到期時間與事件數上限；到期自動回到停用 | ReachAgent 的啟動參數與 `--test-mode` 慣例；`describe` 的 `agent` 欄位 | armed 狀態、到期、計數；`describe` 回報 |
 | G2 允許清單 | 請求的目標 bundle id 必須在啟動時給的清單內；清單不能由請求修改；沒有萬用字元 | `find_bundle`、`process_identity`（兩次取樣、核心啟動時間） | 清單比對與拒絕碼 |
 | G3 目標身分綁定 | 事件前後各取樣程序身分（PID、啟動時間、執行檔、bundle id）與視窗（ID、擁有者、layer 0、幾何）；任何不一致就停 | `Backend::process_identity`、單一視窗查詢、`input_guard::review` 的身分與幾何比對 | 在 ReachAgent 內執行同樣的檢查，緊貼事件投遞 |
-| G4 內容綁定 | 目標是瀏覽器時，網址必須是本機 dev server（`localhost`／`127.0.0.1`）；讀不到或不符就停 | AX 唯讀快照 | 讀網址欄位的規則（唯讀） |
+| G4 內容綁定 | 目標是瀏覽器時，網址必須是本機 dev server（`localhost`／`127.0.0.1`；Surface 給的預設是 `http://127.0.0.1:8080`）；讀不到或不符就停 | AX 唯讀快照 | 讀網址欄位的規則（唯讀） |
 | G5 觀察新鮮度 | 請求必須帶它依據的擷取（`image_sha256`、時間、視窗框）；超過期限或不是最新一張就拒絕 | `input_guard::Observation`／`ObservationToken`、`MAX_OBSERVATION_AGE`（10 秒）、`VirtualSession` 的序號與時間單調檢查 | 把呼叫端陳述換成 ReachAgent 自己保存的擷取紀錄 |
 | G6 座標 | 只接受視窗內的點座標；換算成螢幕座標前，校準必須存在且未失效；點必須落在允許區域內（網頁內容區，或具名的標題列按鈕） | `calibration::fit`／`check` 與四個失效條件、`capture_geometry`、`display_inventory` | 允許區域規則；見 3.1 |
 | G7 遮擋與最上層 | 依前後順序的視窗清單，目標點上最前面的 layer 0 視窗必須就是目標視窗 | `Backend::windows(None)` 的全程序前後順序清單、`ax_cg` 的重疊拒絕 | 點的命中檢查 |
@@ -273,7 +288,7 @@ reach#1、#6 的實機校準還沒做（卡在憑證與權限）。點擊需要�
 
 - 範圍：把 `com.apple.Safari`（與經核准的 Chrome）加入允許清單的程序與文件；G4 的網址檢查；依 Surface 確認的序列執行重測並交付證據。
 - 驗收：
-  - [ ] Surface 的 S1–S8 都有答案並記錄。
+  - [ ] Surface 的 S2–S6、S8 都有答案並記錄（S1、S7 已答）。
   - [ ] 每一步都有 `attempt`／`result` 與事後觀察；任何 `refused` 或 `delivery_unknown` 就停止，不補送。
   - [ ] 交給 Surface 的證據包含它驗收要的欄位（瀏覽器、OS、輸入來源、`isTrusted`、計數與焦點、caret 矩形與候選窗邊界），並註明每一項的取得方式與限制。
   - [ ] 重測結論由 Surface 判定；reach 只提供工具與證據，不含 surface 專用邏輯。
@@ -291,11 +306,11 @@ reach#1、#6 的實機校準還沒做（卡在憑證與權限）。點擊需要�
 | Q1 | 是否接受這次用**前景**模式：會移動實體游標、Safari 必須在前景、執行期間使用者不能碰鍵鼠？ | 接受。這是 #96、#97 語意上的必要條件；只在有人在場的約定時段執行。 |
 | Q2 | reach#2 怎麼處理？ | 保持開啟與 `blocked`，範圍仍是背景輸入。前景模式另開 I-1 至 I-6，並在其中記錄 2026-11-10 的指示與「只限 surface #96、#97」的範圍。 |
 | Q3 | 誰把 Safari 帶到前景、選注音、載入與重新載入頁面？ | 第一版由在場的使用者手動做，reach 只唯讀驗證。reach 不新增啟動 App 或切換輸入來源的能力。 |
-| Q4 | 允許清單放哪些 bundle id？#97 第四項的 Chrome 要不要一起？ | fixture 與 `com.apple.Safari`。Chrome 在 Safari 重測完成後以同樣程序加入，需要使用者明說同意。 |
+| Q4 | 允許清單放哪些 bundle id？Surface 已確認 #97 要在 Safari 之後重複於 Chrome，是否同意把 Chrome 也列入？ | fixture、`com.apple.Safari`，以及 Safari 重測完成後以同樣程序加入的 `com.google.Chrome`。Surface 的確認不等於使用者核准；Chrome 需要使用者明說同意。 |
 | Q5 | 憑證與授權何時做？（建立本機簽章憑證、安裝 ReachAgent、授與輔助使用與螢幕錄製；輸入另需同意事件送出） | 先做，因為它同時解開 reach#5、#6。全部由使用者親手操作。 |
 | Q6 | 真實事件實驗（I-4、I-5、I-6）的時段與條件？ | 每次約定一個時段；開始前關閉不相關的視窗，執行期間不碰鍵鼠；每次啟用設 10 分鐘到期與事件數上限。 |
 | Q7 | Safari 視窗的座標證據，是否接受 3.1 的替代方案（fixture 校準＋幾何檢查＋移動後讀回＋事後觀察）？ | 接受作為第一版；若實測誤差不可接受，再請 Surface 在測試頁提供標記。 |
-| Q8 | 是否請 Surface 在測試頁以 DOM 文字輸出控制項邊界、`isTrusted` 與 caret 資訊（S1–S3）？ | 是，並由 Surface 開自己的 issue。reach 不執行頁面 JavaScript，也不放 surface 專用邏輯。 |
+| Q8 | 是否請 Surface 把 `isTrusted`（以及必要時 caret 矩形）顯示在畫面上（S2、S3）？Surface 目前的說法是靠 console 或 debug 讀數，reach 讀不到 console。 | 是，並由 Surface 開自己的 issue。控制項位置（S1）已定案為由擷取或 OCR 判讀，不需要頁面輸出。reach 不執行頁面 JavaScript，也不放 surface 專用邏輯。 |
 | Q9 | 重測用哪個 Safari 環境？ | 專用的 Safari 視窗，只開 showcase 一個分頁，網址限本機 dev server；不在有其他登入分頁的視窗上執行。 |
 | Q10 | 「綠色按鈕」步驟（S4）若是全螢幕，要不要納入第一輪？ | 第一輪先做不需要它的驗收項目；確認 S4 後再決定。若需要 Option＋點擊，屬於修飾鍵，另行核准。 |
 | Q11 | I-1、I-2（離線、不送事件）是否可以在其他問題定案前先開工？ | 可以。它們不改變預設行為，也不需要權限。 |
