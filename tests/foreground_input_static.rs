@@ -510,22 +510,74 @@ fn the_system_backend_is_reached_only_through_the_startup_guard() {
     assert!(agent.contains("input_unavailable"));
 }
 
-/// Every call site of the start-up guard and of `makeInputController`, as exact lines.
-/// This is a guard against mistakes, not a security boundary: it fails when a new call
-/// appears (for example a self-test that reaches the system path with `testMode: false`).
+/// Swift source without `//` comment lines (doc comments included), so a comment that names
+/// a call does not count as one.
+fn swift_code(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Every call of `name` in `code`, matched as a token like the regex `\bname\s*\(`: the name
+/// has no identifier character before or after it, and only whitespace (newlines included)
+/// stands between it and `(`. Each hit is reported as its trimmed source line, so a call split
+/// over two lines or written with a space still shows up, and differs from the known line.
+fn call_sites(code: &str, name: &str) -> Vec<String> {
+    token_sites(code, name, true)
+}
+
+/// Like `call_sites`, but with `calls_only` false every use of the identifier counts.
+fn token_sites(code: &str, name: &str, calls_only: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for (start, _) in code.match_indices(name) {
+        let end = start + name.len();
+        if code[..start].chars().next_back().is_some_and(is_ident)
+            || code[end..].chars().next().is_some_and(is_ident)
+        {
+            continue;
+        }
+        if calls_only && !code[end..].trim_start().starts_with('(') {
+            continue;
+        }
+        let line_start = code[..start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = code[end..].find('\n').map_or(code.len(), |i| end + i);
+        out.push(code[line_start..line_end].trim().to_string());
+    }
+    out
+}
+
+/// `extension SystemInputLaunch` with any whitespace between the two tokens.
+fn extends_system_input_launch(code: &str) -> bool {
+    code.split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|w| w[0] == "extension" && w[1].split(['{', ':']).next() == Some("SystemInputLaunch"))
+}
+
+/// Every call site of the start-up guard and of `makeInputController`, as exact lines, and
+/// every use of `SystemInputLaunch` outside the system file (plan review N1). This is a guard
+/// against mistakes, not a security boundary: it fails when a new call appears (for example a
+/// self-test that reaches the system path with `testMode: false`), including one split across
+/// lines, written with a space before `(`, or placed in an extension.
 #[test]
 fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
     let expected: &[(&str, &[&str])] = &[
         (
-            "SystemInputLaunch.authorize(",
+            "authorize",
             &[
                 "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,",
                 "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,",
                 "ReachAgent.swift: guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {",
+                "ReachAgentInputSystem.swift: static func authorize(enableInput: Bool, testMode: Bool) -> SystemInputLaunch? {",
             ],
         ),
         (
-            "makeInputController(",
+            "makeInputController",
             &[
                 "ReachAgent.swift: let made = try? makeInputController(testConfig)",
                 "ReachAgent.swift: (try? makeInputController(ServeConfig(socket: \"/tmp/x\", testMode: true, input: nil)))",
@@ -535,18 +587,193 @@ fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
         ),
     ];
     let files = reach_agent_swift_files();
-    for (needle, lines) in expected {
+    for (name, lines) in expected {
         let mut found = Vec::new();
         for file in &files {
-            for line in read(file)
-                .lines()
-                .filter(|l| l.contains(needle) && !l.trim_start().starts_with("//"))
-            {
-                found.push(format!("{file}: {}", line.trim()));
+            for line in call_sites(&swift_code(&read(file)), name) {
+                found.push(format!("{file}: {line}"));
             }
         }
-        assert_eq!(found, *lines, "call sites of {needle}");
+        assert_eq!(found, *lines, "call sites of {name}");
     }
+
+    // Outside the system file the type may appear only in these lines: no extension, no
+    // typealias, no stored reference to `authorize`.
+    let mut found = Vec::new();
+    for file in &files {
+        if file == SYSTEM_BACKEND_FILE {
+            continue;
+        }
+        let code = swift_code(&read(file));
+        assert!(
+            !extends_system_input_launch(&code),
+            "{file} extends SystemInputLaunch"
+        );
+        for line in token_sites(&code, "SystemInputLaunch", false) {
+            found.push(format!("{file}: {line}"));
+        }
+    }
+    assert_eq!(
+        found,
+        [
+            "ReachAgent.swift: var inputLaunch: SystemInputLaunch? = nil",
+            "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,",
+            "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,",
+            "ReachAgent.swift: controller: InputController?, launch: SystemInputLaunch?",
+            "ReachAgent.swift: guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {",
+        ],
+        "uses of SystemInputLaunch outside {SYSTEM_BACKEND_FILE}"
+    );
+}
+
+/// The call-site scan catches the bypasses that an exact-line `contains` missed (plan review N1).
+#[test]
+fn the_call_site_scan_catches_the_known_bypasses() {
+    let known =
+        "guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {";
+    assert_eq!(call_sites(known, "authorize"), [known]);
+    // (a) A second call hidden in an extension.
+    let a = "extension SystemInputLaunch {\n    static func sneak() -> SystemInputLaunch? {\n        authorize(enableInput: true, testMode: false)\n    }\n}\n";
+    assert_eq!(
+        call_sites(a, "authorize"),
+        ["authorize(enableInput: true, testMode: false)"]
+    );
+    assert!(extends_system_input_launch(a));
+    assert!(extends_system_input_launch(
+        "extension\n  SystemInputLaunch{ }"
+    ));
+    assert!(extends_system_input_launch(
+        "extension SystemInputLaunch: Equatable {}"
+    ));
+    assert!(!extends_system_input_launch(
+        "extension SystemInputLaunchX {}"
+    ));
+    // (b) The type and the call on two lines.
+    let b = "let l = SystemInputLaunch\n    .authorize(enableInput: true, testMode: false)\n";
+    let hits = call_sites(b, "authorize");
+    assert_eq!(hits, [".authorize(enableInput: true, testMode: false)"]);
+    assert_ne!(hits[0], known);
+    assert_eq!(token_sites(b, "SystemInputLaunch", false).len(), 1);
+    // (c) A space, or a newline, before the parenthesis.
+    assert_eq!(
+        call_sites(
+            "let x = try makeInputController (config)",
+            "makeInputController"
+        ),
+        ["let x = try makeInputController (config)"]
+    );
+    assert_eq!(
+        call_sites(
+            "let x = try makeInputController\n(config)",
+            "makeInputController"
+        )
+        .len(),
+        1
+    );
+    // A stored reference is not a call, but it is a use of the type.
+    let r = "let f = SystemInputLaunch.authorize\n";
+    assert!(call_sites(r, "authorize").is_empty());
+    assert_eq!(token_sites(r, "SystemInputLaunch", false).len(), 1);
+    // Word boundaries: longer identifiers are not hits, and comment lines are dropped.
+    assert!(call_sites("reauthorize(x) authorizeAll(y)", "authorize").is_empty());
+    let comments = swift_code("// authorize(enableInput: true, testMode: false)\n/// authorize(x)");
+    assert!(call_sites(&comments, "authorize").is_empty());
+}
+
+/// APIs that move the pointer, build events outside the system backend's two helpers, run
+/// scripts or other processes, or bring an app to the front (plan review R4). None is allowed
+/// in any ReachAgent file, the system backend included. Whitespace is removed before the
+/// substring scan, so `. activate (` is caught too.
+const SWIFT_FORBIDDEN_EVERYWHERE: &[&str] = &[
+    "CGWarpMouseCursorPosition",
+    "CGDisplayMoveCursorToPoint",
+    "CGEvent.init",
+    "osascript",
+    "NSTask",
+    ".activate(",
+    "activateIgnoringOtherApps",
+    "NSAppleScript",
+    "NSUserAppleScriptTask",
+];
+
+fn forbidden_everywhere_hits(code: &str) -> Vec<String> {
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut hits: Vec<String> = SWIFT_FORBIDDEN_EVERYWHERE
+        .iter()
+        .filter(|n| compact.contains(**n))
+        .map(|n| n.to_string())
+        .collect();
+    hits.extend(call_sites(code, "Process"));
+    hits
+}
+
+#[test]
+fn no_reach_agent_file_moves_the_pointer_spawns_or_activates() {
+    let mut problems = Vec::new();
+    for file in reach_agent_swift_files() {
+        for hit in forbidden_everywhere_hits(&swift_code(&read(&file))) {
+            problems.push(format!("{file}: {hit}"));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "forbidden in ReachAgent:\n{}",
+        problems.join("\n")
+    );
+    // The scan itself recognizes the spellings it exists to stop.
+    for sample in [
+        "CGWarpMouseCursorPosition(p)",
+        "CGDisplayMoveCursorToPoint(d, p)",
+        "let e = CGEvent.init(source: nil)",
+        "let e = CGEvent\n    .init(source: nil)",
+        "p.launchPath = \"/usr/bin/osascript\"",
+        "let t = NSTask()",
+        "let p = Process()",
+        "let p = Process ()",
+        "app.activate(options: [])",
+        "NSApp\n  .activate (ignoringOtherApps: true)",
+        "app.activateIgnoringOtherApps(true)",
+    ] {
+        assert!(
+            !forbidden_everywhere_hits(sample).is_empty(),
+            "the scan misses {sample:?}"
+        );
+    }
+    for sample in [
+        "ProcessInfo.processInfo.environment",
+        "kernelStart(pid)",
+        "var p: Process?",
+    ] {
+        assert!(
+            forbidden_everywhere_hits(sample).is_empty(),
+            "the scan flags {sample:?}"
+        );
+    }
+}
+
+/// The Swift agent and the Rust model use the same title-bar band and modifier mask
+/// (plan review R1 and R2).
+#[test]
+fn rust_and_swift_share_the_title_band_and_modifier_mask() {
+    use mac_computer_use::foreground_input::{HELD_MODIFIER_FLAGS_MASK, TITLE_BAR_BAND_POINTS};
+    let swift = read("ReachAgentInput.swift");
+    let value = |prefix: &str| -> String {
+        swift
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("ReachAgentInput.swift lacks {prefix:?}"))
+            .trim()
+            .to_string()
+    };
+    let band: f64 = value("let titleBarBandPoints = ").parse().unwrap();
+    assert_eq!(band, TITLE_BAR_BAND_POINTS);
+    let mask = value("let heldModifierFlagsMask: UInt64 = ")
+        .split('|')
+        .map(|t| {
+            u64::from_str_radix(&t.trim().trim_start_matches("0x").replace('_', ""), 16).unwrap()
+        })
+        .fold(0, |a, b| a | b);
+    assert_eq!(mask, HELD_MODIFIER_FLAGS_MASK);
 }
 
 /// The Rust model and the Swift agent accept the same six keycodes (plan 1.3, Q10).

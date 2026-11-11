@@ -9,6 +9,7 @@
 //
 // Input is disabled by default. Nothing here runs unless ReachAgent starts with --enable-input.
 import CryptoKit
+import CoreGraphics
 import Foundation
 
 /// Methods added to `describe` only while input is enabled.
@@ -22,6 +23,23 @@ let maxInputEvents = 20
 /// key. `APPROVED_KEYCODES` in src/foreground_input.rs is the same list; a static test checks it.
 let approvedInputKeycodes = [18, 23, 36, 38, 44, 49]
 let maxObservationAgeNs: UInt64 = 10_000_000_000
+/// G6 refuses the top band of the window frame (plan review R1). The frame is the window-server
+/// bounds and includes the title bar with its close, minimize and zoom buttons. The real content
+/// rect cannot be known offline, so the band is a fixed height that covers a standard title bar
+/// (28 pt) and a unified title bar with toolbar (52 pt). A tab bar or a taller toolbar below it is
+/// not detected. Allowing the named zoom button, and the exact content area, wait for I-4.
+/// `TITLE_BAR_BAND_POINTS` in src/foreground_input.rs is the same value; a static test checks it.
+let titleBarBandPoints = 52.0
+/// CGEventFlags bits that refuse delivery at G9 (plan review R2), as raw values so this file needs
+/// no CoreGraphics: Caps Lock 0x10000, Shift 0x20000, Control 0x40000, Option 0x80000,
+/// Command 0x100000, Fn 0x800000. `HELD_MODIFIER_FLAGS_MASK` in src/foreground_input.rs is the same.
+let heldModifierFlagsMask: UInt64 = 0x0001_0000 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000 | 0x0080_0000
+
+/// G9 decision for a sampled flag word: true when no modifier above is down.
+func modifiersReleased(flags: UInt64) -> Bool { flags & heldModifierFlagsMask == 0 }
+
+/// G9 decision for sampled mouse buttons: true when none is down.
+func mouseButtonsReleased(_ down: [Bool]) -> Bool { !down.contains(true) }
 let inputAttemptSchema = "reach-input-attempt-v1"
 let inputResultSchema = "reach-input-result-v1"
 
@@ -319,12 +337,17 @@ struct InputLiveFacts: Equatable {
     var targetFrontmost: Bool
     var focusUnchanged: Bool
     var hidIdle: Bool
+    /// No modifier in `heldModifierFlagsMask` is down (G9, plan review R2).
+    var modifiersReleased: Bool
+    /// No mouse button is down (G9, plan review R2).
+    var mouseButtonsReleased: Bool
     var secureInputOff: Bool
     var inputSourceOk: Bool
     var pointUnoccluded: Bool
 
     static let failClosed = InputLiveFacts(
         currentBundleId: nil, targetFrontmost: false, focusUnchanged: false, hidIdle: false,
+        modifiersReleased: false, mouseButtonsReleased: false,
         secureInputOff: false, inputSourceOk: false, pointUnoccluded: false)
 }
 
@@ -472,11 +495,14 @@ final class InputGate {
             guard p.x >= 0, p.y >= 0, p.x < latest.frame.width, p.y < latest.frame.height else {
                 return ("G6", "point_outside_window")
             }
+            if p.y < titleBarBandPoints { return ("G6", "point_in_title_bar") }
             if !live.pointUnoccluded { return ("G7", "point_occluded") }
         }
         if !live.targetFrontmost { return ("G8", "target_not_frontmost") }
         if !live.focusUnchanged { return ("G8", "focus_changed") }
         if !live.hidIdle { return ("G9", "hid_not_idle") }
+        if !live.modifiersReleased { return ("G9", "modifier_held") }
+        if !live.mouseButtonsReleased { return ("G9", "mouse_button_down") }
         if !live.secureInputOff { return ("G9", "secure_input_enabled") }
         if !live.inputSourceOk { return ("G9", "input_source_unexpected") }
         return nil
@@ -716,6 +742,7 @@ final class FakeInputBackend: InputSampler, EventPoster, @unchecked Sendable {
     var bundles: [Int32: String] = [:]
     var facts = InputLiveFacts(
         currentBundleId: nil, targetFrontmost: true, focusUnchanged: true, hidIdle: true,
+        modifiersReleased: true, mouseButtonsReleased: true,
         secureInputOff: true, inputSourceOk: true, pointUnoccluded: true)
     var verifyResult = true
     /// Failures to return, by call name ("down", "up", "move", "key_down", "key_up").
@@ -752,14 +779,14 @@ final class FakeInputBackend: InputSampler, EventPoster, @unchecked Sendable {
 }
 
 /// The controller for `--test-mode --enable-input` and the self-test. The fake knows one
-/// target: pid 42, window 7, the 2x2 frame of FakeCaptureBackend, the fixture bundle id.
+/// target: pid 42, window 7, the 2x64 frame of FakeCaptureBackend, the fixture bundle id.
 /// Receipts are real files, so the evidence directory behaves as with the system backend.
 func makeFakeInputController(arming: InputArming, now: @escaping () -> UInt64) -> (
     controller: InputController, fake: FakeInputBackend
 ) {
     let fake = FakeInputBackend()
     fake.processStarts = [42: 1000.5]
-    fake.windows = ["42/7": InputFrame(x: 0, y: 0, width: 2, height: 2)]
+    fake.windows = ["42/7": InputFrame(x: 0, y: 0, width: 2, height: 64)]
     fake.bundles = [42: fixtureBundleId]
     let controller = InputController(
         arming: arming, backendName: "fake", sampler: fake, poster: fake, sink: FileReceiptSink(), now: now)
@@ -910,10 +937,10 @@ func inputSelfCheck() -> [String] {
     // Gate cases: fake backend, fake clock, in-memory receipts.
     let fake = FakeInputBackend()
     fake.processStarts = [42: 1000.5]
-    fake.windows = ["42/7": InputFrame(x: 0, y: 0, width: 100, height: 50)]
+    fake.windows = ["42/7": InputFrame(x: 0, y: 0, width: 100, height: 200)]
     fake.bundles = [42: fixtureBundleId]
     let observation = InputObservation(
-        sha256: sha, pid: 42, windowId: 7, frame: InputFrame(x: 0, y: 0, width: 100, height: 50),
+        sha256: sha, pid: 42, windowId: 7, frame: InputFrame(x: 0, y: 0, width: 100, height: 200),
         processStart: 1000.5, capturedAtNs: 1_000)
     let current = fake.currentWindow(pid: 42, windowId: 7)
     func request(_ id: String, _ event: InputEvent, sha: String = sha, bundle: String = fixtureBundleId,
@@ -936,7 +963,7 @@ func inputSelfCheck() -> [String] {
         return InputGate(arming: InputArming(o, nowNs: 1_000, nowUnixSeconds: 0)!)
     }
     func reason(_ out: InputOutcome) -> String { "\(out.status)/\(out.gate ?? "-")/\(out.reason ?? "-")" }
-    let click = InputEvent.click(x: 10, y: 10)
+    let click = InputEvent.click(x: 10, y: 60)
 
     check(reason(run(InputGate(arming: nil), request("a", click))) == "unsupported/G1/input_disabled",
         "no arming is input_disabled")
@@ -949,14 +976,14 @@ func inputSelfCheck() -> [String] {
     let first = run(limit, request("a", click))
     check(reason(first) == "posted_unverified/-/-" && first.attempted && first.releaseAttempted && first.releaseConfirmed,
         "a click passes every gate with the fake backend")
-    check(fake.events == ["down 10.0 10.0", "up 10.0 10.0"], "the fake backend saw one press and one release")
+    check(fake.events == ["down 10.0 60.0", "up 10.0 60.0"], "the fake backend saw one press and one release")
     check(reason(run(limit, request("b", click, sha: String(repeating: "b", count: 64)))) == "refused/G1/event_limit_reached",
         "the event limit refuses")
 
     let replay = armed()
     _ = run(replay, request("a", click))
     check(reason(run(replay, request("a", click))) == "refused/G13/request_already_executed", "a replay is refused")
-    check(reason(run(replay, request("a", .click(x: 11, y: 10)))) == "refused/G13/request_id_reused", "a reused id is refused")
+    check(reason(run(replay, request("a", .click(x: 11, y: 60)))) == "refused/G13/request_id_reused", "a reused id is refused")
     check(reason(run(replay, request("b", click))) == "refused/G5/observation_already_used", "a spent observation is refused")
     check(replay.remainingEvents == 2, "refusals do not use up events")
 
@@ -978,10 +1005,25 @@ func inputSelfCheck() -> [String] {
     let otherWindow = InputCurrentWindow(pid: 42, windowId: 8, frame: observation.frame, processStart: 1000.5)
     check(reason(run(fresh, request("a", click, window: 8), current: otherWindow)) == "refused/G3/target_mismatch",
         "a target that is not the captured window is refused")
-    let moved = InputCurrentWindow(pid: 42, windowId: 7, frame: InputFrame(x: 5, y: 0, width: 100, height: 50), processStart: 1000.5)
+    let moved = InputCurrentWindow(pid: 42, windowId: 7, frame: InputFrame(x: 5, y: 0, width: 100, height: 200), processStart: 1000.5)
     check(reason(run(fresh, request("a", click), current: moved)) == "refused/G3/identity_mismatch", "a moved window is refused")
-    check(reason(run(fresh, request("a", .click(x: 100, y: 10)))) == "refused/G6/point_outside_window", "a point outside the window is refused")
-    check(reason(run(fresh, request("a", .pointerMove(x: -1, y: 10)))) == "refused/G6/point_outside_window", "a negative point is refused")
+    check(reason(run(fresh, request("a", .click(x: 100, y: 60)))) == "refused/G6/point_outside_window", "a point outside the window is refused")
+    check(reason(run(fresh, request("a", .pointerMove(x: -1, y: 60)))) == "refused/G6/point_outside_window", "a negative point is refused")
+    // R1: the title-bar band (traffic lights included) is refused for every pointer event.
+    check(titleBarBandPoints == 52, "the title-bar band is 52 points")
+    let sdkModifierMask: [CGEventFlags] = [.maskAlphaShift, .maskShift, .maskControl, .maskAlternate, .maskCommand, .maskSecondaryFn]
+    check(heldModifierFlagsMask == sdkModifierMask.reduce(0) { $0 | $1.rawValue },
+          "the held-modifier mask matches the SDK flag values")
+    for (event, what) in [
+        (InputEvent.click(x: 10, y: 0), "the top edge"),
+        (InputEvent.click(x: 70, y: 14), "the zoom button of a standard title bar"),
+        (InputEvent.click(x: 10, y: 51.9), "the bottom of the band"),
+        (InputEvent.pointerMove(x: 50, y: 30), "a pointer move into the band"),
+    ] {
+        check(reason(run(fresh, request("a", event))) == "refused/G6/point_in_title_bar", "a point in the title-bar band is refused: \(what)")
+    }
+    check(reason(run(fresh, request("a", .click(x: 10, y: 200)))) == "refused/G6/point_outside_window",
+        "a point below the window is still outside")
     facts = fake.facts
     facts.pointUnoccluded = false
     check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G7/point_occluded", "an occluded point is refused")
@@ -994,6 +1036,17 @@ func inputSelfCheck() -> [String] {
     facts = fake.facts
     facts.hidIdle = false
     check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/hid_not_idle", "held input is refused")
+    // R2: a held modifier or a pressed mouse button refuses clicks and keys alike.
+    facts = fake.facts
+    facts.modifiersReleased = false
+    check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/modifier_held", "a held modifier is refused")
+    check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: facts)) == "refused/G9/modifier_held",
+        "a held modifier refuses a key_tap too")
+    facts = fake.facts
+    facts.mouseButtonsReleased = false
+    check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/mouse_button_down", "a pressed mouse button is refused")
+    check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: facts)) == "refused/G9/mouse_button_down",
+        "a pressed mouse button refuses a key_tap too")
     facts = fake.facts
     facts.secureInputOff = false
     check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/secure_input_enabled", "secure input is refused")
@@ -1003,8 +1056,22 @@ func inputSelfCheck() -> [String] {
     check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: { var f = fake.facts; f.pointUnoccluded = false; return f }()))
         == "posted_unverified/-/-", "occlusion does not apply to key_tap")
     check(fake.events.count == before + 2, "no refusal sent an event")
-    check(InputLiveFacts.failClosed.targetFrontmost == false && InputLiveFacts.failClosed.hidIdle == false,
+    check(InputLiveFacts.failClosed.targetFrontmost == false && InputLiveFacts.failClosed.hidIdle == false
+        && InputLiveFacts.failClosed.modifiersReleased == false && InputLiveFacts.failClosed.mouseButtonsReleased == false,
         "unknown facts fail closed")
+
+    // R2 decisions on sampled values (the system sampler feeds these; it is not wired in yet).
+    check(modifiersReleased(flags: 0), "no flag means no modifier")
+    for (bit, name) in [(0x0001_0000, "Caps Lock"), (0x0002_0000, "Shift"), (0x0004_0000, "Control"),
+                        (0x0008_0000, "Option"), (0x0010_0000, "Command"), (0x0080_0000, "Fn")] as [(UInt64, String)] {
+        check(!modifiersReleased(flags: bit), "\(name) counts as held")
+        check(!modifiersReleased(flags: bit | 0x0020_0000), "\(name) with the numeric-pad bit counts as held")
+    }
+    // The numeric-pad (0x200000) and non-coalesced (0x100) bits are not modifiers.
+    check(modifiersReleased(flags: 0x0020_0000 | 0x100), "non-modifier flag bits do not refuse")
+    check(mouseButtonsReleased([false, false, false]) && mouseButtonsReleased([]), "no pressed button")
+    check(!mouseButtonsReleased([true, false, false]) && !mouseButtonsReleased([false, false, true]),
+        "any pressed button refuses")
 
     // Receipts and no-retry.
     let receipts = armed()
@@ -1047,7 +1114,7 @@ func inputSelfCheck() -> [String] {
     check(reason(r) == "delivery_unknown/G10/release_failed" && r.releaseAttempted && !r.releaseConfirmed,
         "a failed release is delivery_unknown")
     fake.failures = ["move": .maybeSent("test")]
-    check(reason(run(armed(), request("a", .pointerMove(x: 1, y: 1)))) == "delivery_unknown/G10/post_failed",
+    check(reason(run(armed(), request("a", .pointerMove(x: 1, y: 60)))) == "delivery_unknown/G10/post_failed",
         "a failed move is delivery_unknown")
     fake.failures = [:]
 

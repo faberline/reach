@@ -830,7 +830,7 @@ func selfTest() -> Never {
         let result = r[0]["result"] as? [String: Any]
         check(r[0]["ok"] as? Bool == true, "capture succeeds with the permission")
         check(result?["window_id"] as? Int == 7 && result?["owner_pid"] as? Int == 42, "capture echoes the window")
-        check(result?["image_width"] as? Int == 2 && result?["image_height"] as? Int == 2, "capture reports the size")
+        check(result?["image_width"] as? Int == 2 && result?["image_height"] as? Int == 64, "capture reports the size")
         check(result?["window_scope"] as? String == "onscreen_candidates", "capture uses the onscreen scope")
         check(result?["occlusion_checked"] as? Bool == false, "occlusion is not checked")
         check(result?["image_path"] as? String == shotPath, "capture reports the image path")
@@ -957,7 +957,7 @@ func selfTest() -> Never {
 
         // post_event unknown: a valid action is denied before the gate.
         let sha2x2 = "0000000000000000000000000000000000000000000000000000000000000000"
-        func action(_ id: String, _ sha: String, _ dir: String, _ event: String = #"{"kind":"click","button":"left","x":1,"y":1}"#) -> Data {
+        func action(_ id: String, _ sha: String, _ dir: String, _ event: String = #"{"kind":"click","button":"left","x":1,"y":60}"#) -> Data {
             line(#"{"version":1,"id":"\#(id)","method":"action","params":{"delivery":"foreground","target":{"bundle_id":"\#(fixtureBundleId)","pid":42,"window_id":7,"process_start_unix_seconds":1000.5},"observation":{"image_sha256":"\#(sha)"},"event":\#(event),"evidence_dir":"\#(dir)"}}"#)
         }
         let denied = clientExchange(path: inputSocket, lines: [action("c", sha2x2, evidence)], expecting: 1)
@@ -986,10 +986,12 @@ func selfTest() -> Never {
         }
         check(outcome(call(action("e", sha2x2, evidence))) == "refused/G5/observation_mismatch",
             "an observation that is not the latest capture is refused")
+        check(outcome(call(action("t", sha, evidence, #"{"kind":"click","button":"left","x":1,"y":1}"#)))
+            == "refused/G6/point_in_title_bar", "a click in the title-bar band is refused")
         let posted = call(action("f", sha, evidence))
         check(outcome(posted) == "posted_unverified/-/-", "a click on the captured fixture window is posted to the fake backend")
         check((posted["result"] as? [String: Any])?["action_allowed"] as? Bool == false, "the action reply never allows actions")
-        check(fakeInput.fake.events == ["down 1.0 1.0", "up 1.0 1.0"], "the fake backend recorded one press and one release")
+        check(fakeInput.fake.events == ["down 1.0 60.0", "up 1.0 60.0"], "the fake backend recorded one press and one release")
         for name in ["attempt.json", "result.json"] {
             check(stat(evidence + "/" + name, &info) == 0 && (info.st_mode & 0o777) == 0o600, "\(name) is written with mode 0600")
         }

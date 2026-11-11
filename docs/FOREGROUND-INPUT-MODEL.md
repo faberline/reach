@@ -21,15 +21,15 @@
 | G2 | `bundle_not_allowed`、`keycode_not_allowed` |
 | G3 | `bundle_mismatch`、`process_start_mismatch`、`target_mismatch`、`identity_mismatch`、`invalid_observation` |
 | G5 | `observation_mismatch`、`observation_expired`、`observation_already_used` |
-| G6 | `point_outside_window` |
+| G6 | `point_outside_window`、`point_in_title_bar`（只對有座標的事件） |
 | G7 | `point_occluded`（只對有座標的事件） |
 | G8 | `target_not_frontmost`、`focus_changed` |
-| G9 | `hid_not_idle`、`secure_input_enabled`、`input_source_unexpected` |
+| G9 | `hid_not_idle`、`modifier_held`、`mouse_button_down`、`secure_input_enabled`、`input_source_unexpected` |
 | G12 | `attempt_not_recorded`（寫不進 `attempt` 就不投遞） |
 | G10 | `press_not_sent`（狀態 `refused`；見下方「收據與不重試」） |
 | G13 | `halted_after_delivery_unknown`、`request_already_executed`、`request_id_reused` |
 
-G3、G7 至 G9 所需的事實由後端提供（`LiveFacts`，包含 `current_bundle_id`、`target_frontmost`、`focus_unchanged`、`hid_idle`、`secure_input_off`、`input_source_ok`、`point_unoccluded`）；模型只消費它們，**無法自己確認**。I-2 必須確保這些值來自 ReachAgent 自己的取樣（程序身分、視窗清單、焦點、HID 與安全輸入狀態），絕不能由請求帶入或由呼叫端填寫；否則 G3、G7 至 G9 等於沒有檢查。
+G3、G7 至 G9 所需的事實由後端提供（`LiveFacts`，包含 `current_bundle_id`、`target_frontmost`、`focus_unchanged`、`hid_idle`、`modifiers_released`、`mouse_buttons_released`、`secure_input_off`、`input_source_ok`、`point_unoccluded`）；模型只消費它們，**無法自己確認**。I-2 必須確保這些值來自 ReachAgent 自己的取樣（程序身分、視窗清單、焦點、HID 與安全輸入狀態），絕不能由請求帶入或由呼叫端填寫；否則 G3、G7 至 G9 等於沒有檢查。
 
 ## 重放防護
 
@@ -43,6 +43,15 @@ G3、G7 至 G9 所需的事實由後端提供（`LiveFacts`，包含 `current_bu
 ## 收據與不重試
 
 投遞前先寫 `attempt`（`reach-input-attempt-v1`），成功才計數並投遞；投遞後寫 `result`（`reach-input-result-v1`）。`EventPoster` 的每個呼叫失敗時要分辨兩種錯誤：`PostError::NotSent`（後端確定作業系統沒有收到事件）與 `PostError::MaybeSent`（其他一切情況）。按下可能已送出而後失敗時，嘗試放開一次（`release_attempted`／`release_confirmed`），這是清理而不是重試。按下確定沒送出（`NotSent`）時不呼叫放開，因為沒有對應按下的放開本身就是多餘事件；結果是 `refused`，G10 `press_not_sent`，事件數已用掉，閘門不停機。這個取捨與計畫 G10 一致（G10 要求的是「按下後」失敗才放開），後端只在確定時才能回 `NotSent`，不確定一律回 `MaybeSent`。事後檢查失敗、`result` 寫不進去，或放開失敗，都是 `delivery_unknown`，且之後這個閘門拒絕所有請求（G13），直到以新的啟用取代。`recover_status` 把「有 `attempt` 卻沒有對得上的 `result`」讀成 `delivery_unknown`。
+
+## I-3 閘門強化（計畫審查 R1、R2、N1、R4）
+
+- **R1 標題列（G6）**：座標是相對於整個視窗外框（含標題列），離線無法知道內容區的確切範圍，也無法分辨綠色縮放鈕與其他按鈕。因此從視窗頂端起固定 52 pt（`TITLE_BAR_BAND_POINTS`／`titleBarBandPoints`；涵蓋一般 28 pt 標題列與含工具列的統一標題列）一律拒絕，原因 `point_in_title_bar`，在「視窗外」檢查之後、G7 之前。52 pt 以下若還有分頁列或更高的工具列，這裡偵測不到。**綠色按鈕（以及精確的內容區）要等 I-4 在實機上取得內容區與按鈕位置後再處理**；在那之前標題列整段都不能點。Rust 與 Swift 用同一個值，靜態測試比對兩邊。
+- **R2 按住的修飾鍵與滑鼠鍵（G9）**：新增兩個事實 `modifiers_released`、`mouse_buttons_released`，在 `hid_not_idle` 之後檢查，原因 `modifier_held`、`mouse_button_down`。修飾鍵遮罩為 Caps Lock、Shift、Control、Option、Command、Fn 六個旗標位元（`HELD_MODIFIER_FLAGS_MASK`／`heldModifierFlagsMask`，以原始數值寫成，兩邊由靜態測試比對）；數字鍵盤位元不算。`ReachAgentInputSystem.swift` 加了唯讀取樣函式 `sampleHeldInput()`（`CGEventSource.flagsState(.hidSystemState)` 與左、右、中三個滑鼠鍵的 `buttonState`），**但沒有接進系統後端的 `liveFacts`**：兩個事實在系統後端仍是 fail-closed 的 `false`，接線與實機驗證屬於 I-4。第 4 個以上的滑鼠鍵不在取樣範圍。
+- **N1 呼叫點檢查**：`authorize` 與 `makeInputController` 改用 token 比對（等同 `\bname\s*\(`，可跨行、允許空白），系統檔案中 `authorize` 的定義行也列入已知清單。系統檔案以外的 `SystemInputLaunch` 每次出現都必須在已知清單內，且禁止 `extension SystemInputLaunch`。測試資料包含三種繞過：extension 內呼叫 `authorize(enableInput: true, testMode: false)`、型別與 `.authorize(` 分兩行、`makeInputController (` 中間有空白。
+- **R4 全域禁用**：ReachAgent 編譯的每個 Swift 檔（含系統後端）都不得出現 `CGWarpMouseCursorPosition`、`CGDisplayMoveCursorToPoint`、`CGEvent.init`、`osascript`、`NSTask`、`Process(`、`.activate(`、`activateIgnoringOtherApps`、`NSAppleScript`；比對前先去掉空白。
+
+R3、R5 不在這次範圍。
 
 ## 尚未做的事
 
