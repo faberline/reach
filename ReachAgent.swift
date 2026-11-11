@@ -12,7 +12,7 @@ import Foundation
 
 let protocolVersion = 1
 let appVersion = "0.1.0"
-let methods = ["describe", "permissions", "request_permissions", "capture", "capture_all_windows", "accessibility", "accessibility_subtree"]
+let methods = ["describe", "permissions", "request_permissions", "capture", "capture_all_windows", "accessibility", "accessibility_subtree", "input_source", "secure_input", "pointer_location", "bundle_windows"]
 let permissionNames = ["accessibility", "screen_recording", "post_event"]
 let maxLineBytes = 65536
 let maxSocketPathBytes = 100
@@ -380,7 +380,8 @@ func handleAccessibility(
 /// One request line (without its newline) in, one response line out.
 func handleLine(
     _ line: String, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil
+    axBackend: AccessibilityBackend, testMode: Bool, observe: ObservationBackend = FakeObservationBackend(),
+    input: InputController? = nil
 ) -> String {
     if line.utf8.count > maxLineBytes {
         return errorLine(nil, AgentError("invalid_json", "request line is too long"))
@@ -437,6 +438,8 @@ func handleLine(
         return handleAccessibility(
             id, object, subtree: method == "accessibility_subtree", provider: provider,
             backend: axBackend)
+    case "input_source", "secure_input", "pointer_location", "bundle_windows":
+        return handleObservation(id, method: method, object, backend: observe)
     case "action" where input != nil:
         return handleAction(id, object, provider: provider, input: input!)
     default:
@@ -518,7 +521,8 @@ func writeAll(_ fd: Int32, _ data: Data) -> Bool {
 
 func handleConnection(
     _ fd: Int32, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil
+    axBackend: AccessibilityBackend, testMode: Bool, observe: ObservationBackend = FakeObservationBackend(),
+    input: InputController? = nil
 ) {
     var timeout = timeval(tv_sec: 30, tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
@@ -547,7 +551,7 @@ func handleConnection(
             if let line = String(data: lineData, encoding: .utf8) {
                 reply = handleLine(
                     line, provider: provider, backend: backend, axBackend: axBackend,
-                    testMode: testMode, input: input)
+                    testMode: testMode, observe: observe, input: input)
             } else {
                 reply = errorLine(nil, AgentError("invalid_json", "the request is not UTF-8"))
             }
@@ -578,7 +582,8 @@ func rejectTooLongLine(_ fd: Int32) {
 @discardableResult
 func serve(
     listenFd: Int32, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil, maxConnections: Int?
+    axBackend: AccessibilityBackend, testMode: Bool, observe: ObservationBackend = FakeObservationBackend(),
+    input: InputController? = nil, maxConnections: Int?
 ) -> Bool {
     var handled = 0
     while maxConnections == nil || handled < maxConnections! {
@@ -592,7 +597,7 @@ func serve(
         }
         handleConnection(
             fd, provider: provider, backend: backend, axBackend: axBackend, testMode: testMode,
-            input: input)
+            observe: observe, input: input)
         close(fd)
         handled += 1
     }
@@ -688,7 +693,7 @@ func selfTest() -> Never {
     Thread.detachNewThread {
         serve(
             listenFd: listener, provider: provider, backend: FakeCaptureBackend(),
-            axBackend: FakeAccessibilityBackend(), testMode: true, maxConnections: 6)
+            axBackend: FakeAccessibilityBackend(), testMode: true, maxConnections: 7)
         done.signal()
     }
 
@@ -872,6 +877,60 @@ func selfTest() -> Never {
         failures.append("connection 6 failed")
     }
 
+    // Connection 7: the read-only observations answer from the fake backend, need no
+    // permission (accessibility is denied here) and validate their parameters.
+    let seventh = clientExchange(
+        path: socketPath,
+        lines: [
+            line(#"{"version":1,"id":"a","method":"input_source"}"#),
+            line(#"{"version":1,"id":"b","method":"secure_input","params":{}}"#),
+            line(#"{"version":1,"id":"c","method":"pointer_location"}"#),
+            line(#"{"version":1,"id":"d","method":"bundle_windows","params":{"bundle_id":"\#(fixtureBundleId)"}}"#),
+            line(#"{"version":1,"id":"e","method":"bundle_windows","params":{"bundle_id":"org.local.not-running"}}"#),
+            line(#"{"version":1,"id":"f","method":"bundle_windows","params":{"bundle_id":"\#(FakeObservationBackend.failingBundleId)"}}"#),
+            line(#"{"version":1,"id":"g","method":"bundle_windows","params":{"bundle_id":"bad id"}}"#),
+            line(#"{"version":1,"id":"h","method":"bundle_windows"}"#),
+            line(#"{"version":1,"id":"i","method":"bundle_windows","params":{"bundle_id":"a.b","pid":1}}"#),
+            line(#"{"version":1,"id":"j","method":"input_source","params":{"select":"x"}}"#),
+            line(#"{"version":1,"id":"k","method":"pointer_location","params":[]}"#),
+            line(#"{"version":1,"id":"l","method":"bundle_windows","params":{"bundle_id":""}}"#),
+        ], expecting: 12)
+    if let r = seventh {
+        for (index, reply) in r.prefix(5).enumerated() {
+            let result = reply["result"] as? [String: Any]
+            check(reply["ok"] as? Bool == true, "observation \(index) succeeds without a permission")
+            check(result?["backend"] as? String == "fake", "observation \(index) names the fake backend")
+            check(result?["scope"] as? String == "read_only_unverified", "observation \(index) is unverified")
+            check(result?["action_allowed"] as? Bool == false, "observation \(index) never allows actions")
+            check(result?["used_by_input_gate"] as? Bool == false, "observation \(index) is not used by the gate")
+        }
+        let source = r[0]["result"] as? [String: Any]
+        check(source?["input_source_id"] as? String == "org.local.reach.fake-input-source", "input_source reports the id")
+        check(source?["input_mode_id"] is NSNull, "a missing input mode is null")
+        check(source?["selection_changed"] as? Bool == false, "input_source never changes the selection")
+        check((r[1]["result"] as? [String: Any])?["secure_event_input_enabled"] as? Bool == false,
+            "secure_input reports the state")
+        let pointer = r[2]["result"] as? [String: Any]
+        check(pointer?["x"] as? Double == 100.5 && pointer?["y"] as? Double == 200.25, "pointer_location reports the point")
+        check(pointer?["coordinate_space"] as? String == "global_top_left_points", "pointer_location names its space")
+        let fixture = r[3]["result"] as? [String: Any]
+        let windows = fixture?["windows"] as? [[String: Any]]
+        check(fixture?["bundle_id"] as? String == fixtureBundleId, "bundle_windows echoes the bundle id")
+        check(fixture?["owner_pids"] as? [Int] == [42], "bundle_windows lists the owner pid")
+        check(windows?.map { $0["layer"] as? Int } == [0, 20], "bundle_windows reports the layers")
+        check((windows?.last?["bounds"] as? [String: Any])?["width"] as? Double == 240, "bundle_windows reports the bounds")
+        check(fixture?["window_titles"] as? String == "not_read", "bundle_windows reads no titles")
+        let empty = r[4]["result"] as? [String: Any]
+        check((empty?["windows"] as? [Any])?.isEmpty == true && (empty?["owner_pids"] as? [Any])?.isEmpty == true,
+            "an app that is not running has no windows")
+        check(code(r[5]) == "observation_failed", "a backend failure is observation_failed")
+        for index in 6..<12 {
+            check(code(r[index]) == "invalid_params", "observation request \(index) is invalid")
+        }
+    } else {
+        failures.append("connection 7 failed")
+    }
+
     for failure in accessibilitySelfCheck() { failures.append("accessibility self-check: \(failure)") }
     for failure in inputSelfCheck() { failures.append("input self-check: \(failure)") }
 
@@ -1031,7 +1090,7 @@ func selfTest() -> Never {
         axBackend: FakeAccessibilityBackend(), testMode: true)
     check(plainAction.contains("\"unknown_method\""), "action is an unknown method without --enable-input")
 
-    check(done.wait(timeout: .now() + 10) == .success, "service stopped after six connections")
+    check(done.wait(timeout: .now() + 10) == .success, "service stopped after seven connections")
     close(listener)
     for path in [shotPath, allPath, keptPath, sixthPath] { unlink(path) }
     unlink(socketPath)
@@ -1039,7 +1098,7 @@ func selfTest() -> Never {
     check(rmdir(directory) == 0, "temporary directory removed")
 
     if failures.isEmpty {
-        print("ReachAgent self-test passed; no screen capture, no accessibility read, no permission prompt, no input event (fake input backend only)")
+        print("ReachAgent self-test passed; no screen capture, no accessibility read, no system observation, no permission prompt, no input event (fake input backend only)")
         exit(0)
     }
     for failure in failures { fputs("self-test failed: \(failure)\n", stderr) }
@@ -1107,10 +1166,11 @@ struct ReachAgent {
             let backend: CaptureBackend = testMode ? FakeCaptureBackend() : SystemCaptureBackend()
             let axBackend: AccessibilityBackend =
                 testMode ? FakeAccessibilityBackend() : SystemAccessibilityBackend()
+            let observe: ObservationBackend = testMode ? FakeObservationBackend() : SystemObservationBackend()
             if !testMode { prepareScreenCapture() }
             let stoppedNormally = serve(
                 listenFd: listener, provider: provider, backend: backend, axBackend: axBackend,
-                testMode: testMode, input: input.controller, maxConnections: nil)
+                testMode: testMode, observe: observe, input: input.controller, maxConnections: nil)
             if !stoppedNormally {
                 close(listener)
                 unlink(config.socket)

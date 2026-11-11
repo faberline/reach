@@ -3,11 +3,12 @@
 //! Sends one request line and reads one reply line per connection, using the protocol in
 //! `agent_protocol`. It never starts the App, never asks for a permission and never sends
 //! an input event: the only methods it uses are `describe`, `permissions`, `capture`,
-//! `capture_all_windows`, `accessibility` and `accessibility_subtree`.
+//! `capture_all_windows`, `accessibility`, `accessibility_subtree` and the read-only
+//! observations `input_source`, `secure_input`, `pointer_location` and `bundle_windows`.
 use crate::agent_protocol::{
-    check_accessibility_result, check_capture_result, check_subtree_result,
-    parse_accessibility_params, parse_capture_params, parse_subtree_params, Method, MAX_LINE_BYTES,
-    PROTOCOL_VERSION,
+    check_accessibility_result, check_capture_result, check_observation_result,
+    check_subtree_result, parse_accessibility_params, parse_bundle_windows_params,
+    parse_capture_params, parse_subtree_params, Method, MAX_LINE_BYTES, PROTOCOL_VERSION,
 };
 use serde_json::{json, Map, Value};
 use std::{
@@ -218,8 +219,9 @@ fn parse_reply(id: &str, reply: &[u8]) -> Result<Value, CallError> {
     }
 }
 
-/// True for the four routable methods when the request has neither `capture_helper` nor
-/// `ax_helper`. A request with either key keeps the direct helper path.
+/// True for the four helper-backed methods when the request has neither `capture_helper` nor
+/// `ax_helper` (a request with either key keeps the direct helper path), and always for the
+/// four read-only observations, which only ReachAgent serves.
 pub fn is_routed(request: &Value) -> bool {
     let Some(object) = request.as_object() else {
         return false;
@@ -229,6 +231,10 @@ pub fn is_routed(request: &Value) -> bool {
         Some("capture" | "capture_all_windows" | "accessibility" | "accessibility_subtree")
     ) && !object.contains_key("capture_helper")
         && !object.contains_key("ax_helper")
+        || matches!(
+            object.get("method").and_then(Value::as_str),
+            Some("input_source" | "secure_input" | "pointer_location" | "bundle_windows")
+        )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -270,6 +276,8 @@ pub fn route(request: &Value, socket: &Path) -> Routed {
         Some(Method::Capture | Method::CaptureAllWindows) => (&["pid", "window_id", "image"], &[]),
         Some(Method::Accessibility) => (&["pid"], &["windows_only"]),
         Some(Method::AccessibilitySubtree) => (&["pid", "source", "path"], &[]),
+        Some(Method::InputSource | Method::SecureInput | Method::PointerLocation) => (&[], &[]),
+        Some(Method::BundleWindows) => (&["bundle_id"], &[]),
         _ => return failed("method is not routed through ReachAgent"),
     };
     let method = Method::parse(method_name).expect("parsed above");
@@ -297,10 +305,17 @@ pub fn route(request: &Value, socket: &Path) -> Routed {
             Ok(p) => Box::new(move |r| check_accessibility_result(&p, r)),
             Err(e) => return failed(e.message),
         },
-        _ => match parse_subtree_params(&params) {
+        Method::AccessibilitySubtree => match parse_subtree_params(&params) {
             Ok(p) => Box::new(move |r| check_subtree_result(&p, r)),
             Err(e) => return failed(e.message),
         },
+        Method::BundleWindows => match parse_bundle_windows_params(&params) {
+            Ok(bundle_id) => {
+                Box::new(move |r| check_observation_result(method, Some(&bundle_id), r))
+            }
+            Err(e) => return failed(e.message),
+        },
+        _ => Box::new(move |r| check_observation_result(method, None, r)),
     };
     let result = match call(socket, id, method_name, &params, CALL_TIMEOUT) {
         Ok(result) => result,
@@ -323,7 +338,16 @@ pub fn route(request: &Value, socket: &Path) -> Routed {
     if let Err(mismatch) = checker(&result) {
         return failed(format!("agent result mismatch: {mismatch}"));
     }
-    let status = if method == Method::Accessibility {
+    // A read-only observation answers its own question; a capture or subtree candidate still
+    // needs the caller to confirm it.
+    let status = if matches!(
+        method,
+        Method::Accessibility
+            | Method::InputSource
+            | Method::SecureInput
+            | Method::PointerLocation
+            | Method::BundleWindows
+    ) {
         "ok"
     } else {
         "unknown"
@@ -751,11 +775,21 @@ mod tests {
             );
         }
         for method in [
+            "input_source",
+            "secure_input",
+            "pointer_location",
+            "bundle_windows",
+        ] {
+            assert!(is_routed(&with(method, json!({}))), "{method}");
+        }
+        for method in [
             "windows",
             "describe",
             "observe_window",
             "action",
             "all_windows",
+            "permissions",
+            "request_permissions",
         ] {
             assert!(!is_routed(&with(method, json!({}))), "{method}");
         }
@@ -844,6 +878,72 @@ mod tests {
     }
 
     #[test]
+    fn route_forwards_the_observations_and_checks_them() {
+        let common = json!({"backend": "fake", "scope": "read_only_unverified",
+                            "action_allowed": false, "used_by_input_gate": false});
+        let merged = |fields: Value| {
+            let mut value = common.clone();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            value
+        };
+        let cases = [
+            (
+                json!({"id": "o1", "method": "input_source"}),
+                merged(json!({"input_source_id": "x", "input_mode_id": null,
+                    "localized_name": null, "source_type": null, "selection_changed": false})),
+                json!({}),
+            ),
+            (
+                json!({"id": "o2", "method": "secure_input"}),
+                merged(json!({"secure_event_input_enabled": true})),
+                json!({}),
+            ),
+            (
+                json!({"id": "o3", "method": "pointer_location"}),
+                merged(json!({"x": 1.0, "y": -2.5, "coordinate_space": "global_top_left_points"})),
+                json!({}),
+            ),
+            (
+                json!({"id": "o4", "method": "bundle_windows", "bundle_id": "a.b"}),
+                merged(json!({"bundle_id": "a.b", "owner_pids": [], "windows": [],
+                    "truncated": false, "window_scope": "onscreen_only",
+                    "window_titles": "not_read"})),
+                json!({"bundle_id": "a.b"}),
+            ),
+        ];
+        for (request, report, params) in cases {
+            let id = request["id"].as_str().unwrap().to_string();
+            let app = FakeApp::spawn(vec![ok(&id, report.clone())]);
+            assert_eq!(
+                route(&request, &app.socket),
+                Routed::Done {
+                    status: "ok",
+                    result: report.clone()
+                },
+                "{request}"
+            );
+            let seen = app.finish();
+            let sent: Value = serde_json::from_str(&seen[0]).unwrap();
+            assert_eq!(sent["method"], request["method"]);
+            assert_eq!(sent["params"], params);
+
+            let mut lying = report;
+            lying["used_by_input_gate"] = json!(true);
+            let app = FakeApp::spawn(vec![ok(&id, lying)]);
+            match route(&request, &app.socket) {
+                Routed::Failed { reason, .. } => {
+                    assert!(reason.contains("used_by_input_gate"), "{reason}")
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+            app.finish();
+        }
+    }
+
+    #[test]
     fn route_validates_before_connecting() {
         let dir = FakeApp::idle();
         let invalid = [
@@ -853,6 +953,11 @@ mod tests {
             json!({"id": "a", "method": "accessibility_subtree", "pid": 42, "source": "x", "path": []}),
             json!({"id": "a", "method": "accessibility", "windows_only": true}),
             json!({"id": "a", "method": "accessibility", "pid": 42, "windows_only": "yes"}),
+            json!({"id": "a", "method": "input_source", "select": "com.apple.keylayout.ABC"}),
+            json!({"id": "a", "method": "pointer_location", "x": 1}),
+            json!({"id": "a", "method": "bundle_windows"}),
+            json!({"id": "a", "method": "bundle_windows", "bundle_id": "bad id"}),
+            json!({"id": "a", "method": "bundle_windows", "bundle_id": "a.b", "pid": 1}),
         ];
         for request in invalid {
             match route(&request, &dir.socket) {

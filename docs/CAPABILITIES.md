@@ -11,6 +11,7 @@ Agent 可使用[通用 JSON CLI](AGENT-CLI.md)逐步呼叫視窗、無障礙、�
 - `windows --pid PID` 列出指定程序的可見視窗候選、Core Graphics 原始 layer、可取得的標題及表面分類。layer 為 0 顯示 `normal_layer_candidate`，其他數值顯示 `non_normal_layer`，缺失或無法讀取顯示 `unknown_layer`。標題缺失、錯誤或過長時為 `null`；標題不是唯一身分。layer 0 也不能證明這是一般 App 視窗、沒有遮擋或擁有焦點。清單不授權操作。
 - `capture --pid PID --window ID --output /absolute/new.png` 在擷取前後檢查 PID、程序啟動時間、視窗 ID、layer 和幾何，並檢查擷取器與視窗清單的座標是否相同。未知或非 0 layer 不進行擷取；擷取器另要求 ScreenCaptureKit 排除桌面視窗。這些檢查不證明 layer 0 是安全操作目標。它解碼 PNG，核對實際像素尺寸是否符合擷取資料，並保存 SHA-256 和同名 `.json` 證據；證據不覆寫既有檔案。擷取失敗時會記錄原因，並將可能存在的圖片標為歸屬未確認。這些檢查不證明圖片座標與視窗座標已校準。畫面預設是 `unknown`，不允許操作。
 - `action` 預設明確回報 `unsupported`。前景 `action`（`delivery: "foreground"`）只轉給以 `--enable-input` 啟動的 ReachAgent；App 不在時回 `agent_unavailable`，未啟用時回 `unsupported`（`input_disabled`）。系統輸入後端尚未在真機執行或驗證，不搶使用者滑鼠及焦點的背景輸入也尚未完成。
+- ReachAgent 的唯讀觀測（I-3）：`input_source`（目前的鍵盤輸入來源）、`secure_input`（安全輸入是否開啟）、`pointer_location`（指標位置）與 `bundle_windows`（某 bundle id 在螢幕上的視窗與 layer、bounds）。只讀狀態，不需要權限、不彈窗、不切換輸入來源、不移動指標、不讀標題；經 `cu-agent` 與 `cu-mcp` 只能透過 ReachAgent 呼叫。**實機未驗證**，前景輸入的閘門也不使用這些讀值（G7 至 G9 仍失敗即關閉），接上要等 I-4 實機驗證。見[服務協定](AGENT-SERVICE.md)。
 - `capabilities` 以 JSON 回報目前的靜態實作範圍。它不檢查權限或目標，也不啟動 helper。背景輸入、前景輸入、鍵盤與 AX 動作都回報不支援；游標與焦點隔離仍未驗證。
 - `display-inventory` 是獨立的唯讀程式。它連續讀取兩次 Core Graphics 的活動顯示器、位置、尺寸、像素數、旋轉和鏡像來源；兩次不一致或資料不完整時回報 `unknown`。相同也只代表兩次取樣一致，不代表兩次之間沒有變化。它不驗證截圖像素與畫面座標的對應，不允許輸入。建置及執行：`CARGO_HOME=/private/tmp/sw-cargo-cache cargo run --locked --offline --bin display-inventory`。
 - `input_guard` 可離線檢查視窗、座標、畫面期限與身分是否相符。資料由呼叫端提供；此檢查不證明資料來源，也不允許輸入。

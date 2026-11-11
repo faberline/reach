@@ -192,6 +192,10 @@ fn describe_methods() -> Value {
       "accessibility":{"fields":["pid","ax_helper"]},
       "accessibility_subtree":{"fields":["pid","ax_helper","source","path"],"availability":"fresh AX branch; path and window identity unverified"},
       "observe_binding":{"fields":["pid","window_id","ax_helper"]},
+      "input_source":{"fields":[],"availability":"read-only current keyboard input source through ReachAgent; never selects one; unverified on a real machine; not used by the input gate"},
+      "secure_input":{"fields":[],"availability":"read-only secure event input state through ReachAgent; unverified on a real machine; not used by the input gate"},
+      "pointer_location":{"fields":[],"availability":"read-only pointer location through ReachAgent; never moves the pointer; unverified on a real machine; not used by the input gate"},
+      "bundle_windows":{"fields":["bundle_id"],"availability":"read-only on-screen windows of one bundle id with layer and bounds through ReachAgent; titles not read; unverified on a real machine; not used by the input gate"},
       "capture":{"fields":["pid","window_id","image","capture_helper","ax_helper"]},
       "capture_all_windows":{"fields":["pid","window_id","image","capture_helper","ax_helper"],"availability":"all-window candidate capture; content and freshness unverified"},
       "record_stream_status":{"fields":["pid","window_id","stream_helper","ax_helper","output"],"availability":"read-only stream metadata evidence; never authorizes input"},
@@ -228,6 +232,10 @@ fn describe_with_agent(agent: Value) -> Value {
             json!(["pid", "source", "path"]),
             None,
         ),
+        ("input_source", json!([]), None),
+        ("secure_input", json!([]), None),
+        ("pointer_location", json!([]), None),
+        ("bundle_windows", json!(["bundle_id"]), None),
     ] {
         if let Some(entry) = d["methods"][method].as_object_mut() {
             entry.insert("agent_fields".into(), fields);
@@ -245,7 +253,8 @@ fn agent_status() -> Value {
         Err(reason) => agent_client::app_status(Err(&reason)),
     }
 }
-/// The four routable methods without helper keys go to the ReachAgent socket.
+/// The four helper-backed methods without helper keys, and the four read-only observations,
+/// go to the ReachAgent socket.
 fn routed(v: &Value, id: &str, method: &str) -> ExitCode {
     let socket = match agent_client::default_socket_path() {
         Ok(socket) => socket,

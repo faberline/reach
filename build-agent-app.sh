@@ -43,7 +43,7 @@ fi
 
 app="$out/ReachAgent.app"
 mkdir -p "$app/Contents/MacOS" /private/tmp/sw-computer-use-swift-cache
-swiftc -parse-as-library -O -module-cache-path /private/tmp/sw-computer-use-swift-cache ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift ReachAgentInput.swift ReachAgentInputSystem.swift -o "$app/Contents/MacOS/ReachAgent"
+swiftc -parse-as-library -O -module-cache-path /private/tmp/sw-computer-use-swift-cache ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift ReachAgentInput.swift ReachAgentInputSystem.swift ReachAgentObservation.swift -o "$app/Contents/MacOS/ReachAgent"
 cp ReachAgent-Info.plist "$app/Contents/Info.plist"
 codesign --force --sign "$identity" --identifier dev.faberline.reach.agent "$app"
 codesign --verify --strict "$app"
