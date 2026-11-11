@@ -34,7 +34,7 @@ cargo test --locked
 CI 只有一個 workflow（`.github/workflows/ci.yml`，名稱 `ci`），依 aw 的 CI 階段標準分成 `lint → test-linux／test-macos → gate`：
 
 - `lint`（`ubuntu-latest`）：只跑 `cargo fmt --all -- --check` 與 `cargo clippy --workspace --all-targets --locked -- -D warnings`。
-- `test-linux`（`ubuntu-latest`，顯示名稱 `test: linux (lib, offline)`）：`cargo test --locked --lib`，再加一步只讀檔或純離線的整合測試：`ax_incomplete_docs`、`bin_platform_split`、`calibration_docs`、`ci_workflow`、`docs_links`、`docs_public_paths`、`import_hygiene`、`platform_boundary`、`provenance_manifest`、`virtual_input`、`window_identity_docs`。
+- `test-linux`（`ubuntu-latest`，顯示名稱 `test: linux (lib, offline)`）：`cargo test --locked --lib`，再加一步只讀檔或純離線的整合測試：`ax_incomplete_docs`、`bin_platform_split`、`calibration_docs`、`ci_workflow`、`docs_links`、`docs_public_paths`、`foreground_input_static`、`import_hygiene`、`platform_boundary`、`provenance_manifest`、`virtual_input`、`window_identity_docs`。
 - `test-macos`（`macos-latest`；本儲存庫是公開的，所以免費）：先以 `sh build-capture.sh` 建置擷取 helper 並執行其 `--self-test`（只用合成 PNG，不擷取螢幕，不需權限），再跑 `cargo test --workspace --locked --no-fail-fast`。另外以 `sh build-cursor-overlay.sh` 建置游標 overlay helper 並執行其 `--self-test`（不把視窗放上螢幕，不需權限），見 [游標 overlay](CURSOR-OVERLAY.md)。
 - `gate`：`if: always()`，等所有 job；只有 `lint` 成功且其他 job 都成功或略過時才通過。之後若加 ruleset，只需要求 `gate`，名稱不可改。
 

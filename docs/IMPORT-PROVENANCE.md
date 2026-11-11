@@ -26,7 +26,7 @@ Reach 的初始程式與文件來自一個**不是 git** 的既有目錄（沒�
 
 ## 狀態說明與清單
 
-共 84 個來源檔，其中 34 個在匯入後被修改。狀態 `copied` 代表本庫檔案與來源 sha256 相同；`modified` 代表已修改，表中 sha256 仍是**來源**的值。本庫在 2026-11-10 以單一 commit 重建，匯入當時的逐步 commit 不在本庫。修改的原因依序是：文件獨立化與 agent 中立、遊戲字樣中性化、`cargo fmt` 與 clippy 的機械修改。
+共 84 個來源檔，其中 35 個在匯入後被修改。狀態 `copied` 代表本庫檔案與來源 sha256 相同；`modified` 代表已修改，表中 sha256 仍是**來源**的值。本庫在 2026-11-10 以單一 commit 重建，匯入當時的逐步 commit 不在本庫。修改的原因依序是：文件獨立化與 agent 中立、遊戲字樣中性化、`cargo fmt` 與 clippy 的機械修改。
 
 | sha256（來源檔） | 來源路徑 | 本庫路徑 | 狀態 |
 |---|---|---|---|
@@ -74,7 +74,7 @@ Reach 的初始程式與文件來自一個**不是 git** 的既有目錄（沒�
 | 2051291bf36d2416ffd1e95cfc688a00c3c15bf3a93bc1cc00d8135867d39b46 | `src/capture_geometry.rs` | `src/capture_geometry.rs` | modified |
 | 266fa9a92e83f2f450daf629c384cb91901928a69c4d8c954f71897462a6ca51 | `src/capture_lock.rs` | `src/platform/macos/capture_lock.rs` | modified |
 | e3e5f513448535775f306f56a02c4c61ea064f0093cf491a4400568d476d67dc | `src/display_inventory.rs` | `src/display_inventory.rs` | modified |
-| effdbb9e457138e4d5bfecc9fceddbabd712bd1e607cd7a980076c6e05106b1f | `src/input_guard.rs` | `src/input_guard.rs` | copied |
+| effdbb9e457138e4d5bfecc9fceddbabd712bd1e607cd7a980076c6e05106b1f | `src/input_guard.rs` | `src/input_guard.rs` | modified |
 | d855a1c3ad79ad3054cc27e3eb2e789adc25e93029fa36cc0806a7876296c730 | `src/joint_observation.rs` | `src/joint_observation.rs` | modified |
 | 43ff3e7c17bf5459e3e13983181905ae86d6abad53d4a0810c2f59cb74801039 | `src/lib.rs` | `src/lib.rs` | modified |
 | 7bc8d8205c674b0ac44a6afe281aab1f3171200a9cb71aa03b60e3b7c1317cbb | `src/live_ax_cg.rs` | `src/live_ax_cg.rs` | modified |

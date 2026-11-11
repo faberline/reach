@@ -34,6 +34,7 @@ pub mod calibration;
 pub mod capture_geometry;
 pub mod cursor_overlay;
 pub mod display_inventory;
+pub mod foreground_input;
 pub mod input_guard;
 pub mod interpretation;
 pub mod joint_observation;

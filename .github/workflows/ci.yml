@@ -38,7 +38,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --locked --lib
-      - run: cargo test --locked --test ax_incomplete_docs --test bin_platform_split --test calibration_docs --test ci_workflow --test docs_links --test docs_public_paths --test import_hygiene --test platform_boundary --test provenance_manifest --test virtual_input --test window_identity_docs
+      - run: cargo test --locked --test ax_incomplete_docs --test bin_platform_split --test calibration_docs --test ci_workflow --test docs_links --test docs_public_paths --test foreground_input_static --test import_hygiene --test platform_boundary --test provenance_manifest --test virtual_input --test window_identity_docs
   test-macos:
     name: "test: macos (workspace)"
     needs: [lint]
