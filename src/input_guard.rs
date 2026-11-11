@@ -92,6 +92,10 @@ impl Observation {
         })
     }
 
+    pub fn image_sha256(&self) -> &str {
+        &self.image_sha256
+    }
+
     pub fn token(&self) -> ObservationToken {
         ObservationToken(self.clone())
     }
@@ -125,6 +129,15 @@ impl PreflightOnly {
     }
 }
 
+/// Foreground variant of `InputRequest`. Delivery is implicitly foreground, and
+/// `point` is `None` for events that carry no coordinates (a key tap).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForegroundRequest {
+    pub destination: Destination,
+    pub point: Option<WindowPoint>,
+    pub observation: ObservationToken,
+}
+
 /// Pure comparison only. It does not inspect the OS or run an input backend.
 pub fn review(
     request: &InputRequest,
@@ -132,14 +145,51 @@ pub fn review(
     current: &CurrentWindow,
     now: Instant,
 ) -> Result<PreflightOnly, Denial> {
-    let target = match request.destination {
-        Destination::Window(target) => target,
-        Destination::Desktop => return Err(Denial::DesktopUnsupported),
-    };
     if request.delivery != Delivery::Background {
         return Err(Denial::ForegroundUnsupported);
     }
-    if request.observation.0 != *latest {
+    review_common(
+        request.destination,
+        Some(request.point),
+        &request.observation,
+        latest,
+        current,
+        now,
+    )
+}
+
+/// Foreground variant of `review`: the same identity, freshness and geometry
+/// checks, with `Desktop` still refused. Pure comparison; it grants nothing.
+/// Foreground-only conditions (focus, HID state, ...) are not decided here.
+pub fn review_foreground(
+    request: &ForegroundRequest,
+    latest: &Observation,
+    current: &CurrentWindow,
+    now: Instant,
+) -> Result<PreflightOnly, Denial> {
+    review_common(
+        request.destination,
+        request.point,
+        &request.observation,
+        latest,
+        current,
+        now,
+    )
+}
+
+fn review_common(
+    destination: Destination,
+    point: Option<WindowPoint>,
+    observation: &ObservationToken,
+    latest: &Observation,
+    current: &CurrentWindow,
+    now: Instant,
+) -> Result<PreflightOnly, Denial> {
+    let target = match destination {
+        Destination::Window(target) => target,
+        Destination::Desktop => return Err(Denial::DesktopUnsupported),
+    };
+    if observation.0 != *latest {
         return Err(Denial::StaleObservation);
     }
     let age = now
@@ -156,7 +206,9 @@ pub fn review(
     {
         return Err(Denial::CurrentIdentityMismatch);
     }
-    let p = request.point;
+    let Some(p) = point else {
+        return Ok(PreflightOnly);
+    };
     if !p.x.is_finite()
         || !p.y.is_finite()
         || p.x < 0.0
@@ -360,6 +412,76 @@ mod tests {
         current.window.layer = Some(1);
         assert_eq!(
             review(&request, &valid, &current, now),
+            Err(Denial::CurrentIdentityMismatch)
+        );
+    }
+    fn foreground(frame: &Observation, point: Option<WindowPoint>) -> ForegroundRequest {
+        ForegroundRequest {
+            destination: Destination::Window(frame.window.target),
+            point,
+            observation: frame.token(),
+        }
+    }
+
+    #[test]
+    fn foreground_review_accepts_what_background_review_refuses_by_delivery() {
+        let now = Instant::now();
+        let latest = frame(now, 1);
+        let (_, current) = context(&latest);
+        let ok = foreground(&latest, Some(WindowPoint { x: 20.0, y: 10.0 }));
+        assert!(!review_foreground(&ok, &latest, &current, now)
+            .unwrap()
+            .action_allowed());
+        // The background review keeps refusing foreground delivery.
+        let (mut request, _) = context(&latest);
+        request.delivery = Delivery::Foreground;
+        assert_eq!(
+            review(&request, &latest, &current, now),
+            Err(Denial::ForegroundUnsupported)
+        );
+        // A key tap has no point.
+        assert!(review_foreground(&foreground(&latest, None), &latest, &current, now).is_ok());
+    }
+
+    #[test]
+    fn foreground_review_keeps_every_other_check() {
+        let now = Instant::now();
+        let latest = frame(now, 1);
+        let (_, mut current) = context(&latest);
+        let mut req = foreground(&latest, Some(WindowPoint { x: 20.0, y: 10.0 }));
+        req.destination = Destination::Desktop;
+        assert_eq!(
+            review_foreground(&req, &latest, &current, now),
+            Err(Denial::DesktopUnsupported)
+        );
+        req.destination = Destination::Window(Target::new(43, 7).unwrap());
+        assert_eq!(
+            review_foreground(&req, &latest, &current, now),
+            Err(Denial::TargetMismatch)
+        );
+        let mut req = foreground(&latest, Some(WindowPoint { x: 100.0, y: 10.0 }));
+        assert_eq!(
+            review_foreground(&req, &latest, &current, now),
+            Err(Denial::PointOutsideWindow)
+        );
+        req.point = None;
+        req.observation = frame(now, 2).token();
+        assert_eq!(
+            review_foreground(&req, &latest, &current, now),
+            Err(Denial::StaleObservation)
+        );
+        assert_eq!(
+            review_foreground(
+                &foreground(&latest, None),
+                &latest,
+                &current,
+                now + MAX_OBSERVATION_AGE + Duration::from_nanos(1)
+            ),
+            Err(Denial::ObservationExpired)
+        );
+        current.process_start_unix_seconds += 1.0;
+        assert_eq!(
+            review_foreground(&foreground(&latest, None), &latest, &current, now),
             Err(Denial::CurrentIdentityMismatch)
         );
     }

@@ -2,13 +2,14 @@
 //! They read files only.
 use std::{fs, path::PathBuf};
 
-const LINUX_TESTS: [&str; 11] = [
+const LINUX_TESTS: [&str; 12] = [
     "ax_incomplete_docs",
     "bin_platform_split",
     "calibration_docs",
     "ci_workflow",
     "docs_links",
     "docs_public_paths",
+    "foreground_input_static",
     "import_hygiene",
     "platform_boundary",
     "provenance_manifest",
