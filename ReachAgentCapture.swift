@@ -133,23 +133,24 @@ struct SystemCaptureBackend: CaptureBackend {
 
 // MARK: - Fake backend
 
-/// Used by --self-test and --test-mode: a synthetic 2x2 PNG, no screen access.
+/// Used by --self-test and --test-mode: a synthetic 2x64 PNG, no screen access.
+/// It is 64 points tall so that the fake window has points below the title-bar band (G6).
 /// Window id 4242 stands for "window missing".
 struct FakeCaptureBackend: CaptureBackend {
     func capture(_ request: CaptureRequest) async throws -> [String: Any] {
         if request.windowId == 4242 {
             throw CaptureFailure("window missing or ambiguous for requested scope")
         }
-        guard let context = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8,
+        guard let context = CGContext(data: nil, width: 2, height: 64, bitsPerComponent: 8,
                                       bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let image = context.makeImage() else { throw CaptureFailure("cannot create synthetic image") }
         try writeNew(try pngData(image), path: request.output)
-        let frame = rectValues(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let frame = rectValues(CGRect(x: 0, y: 0, width: 2, height: 64))
         return [
             "window_id": request.windowId, "owner_pid": request.pid, "window_frame_points": frame,
             "filter_content_rect_points": frame, "point_pixel_scale": 1.0,
-            "image_width": 2, "image_height": 2,
+            "image_width": 2, "image_height": 64,
             "capture_start_uptime_ns": 1, "capture_end_uptime_ns": 2,
             "capture_end_unix_seconds": 0.0, "image_path": request.output,
             "capture_type": "desktop_independent_window",

@@ -32,6 +32,27 @@ pub const APPROVED_KEYCODES: &[u16] = &[18, 23, 36, 38, 44, 49];
 /// Plan Q6 asks for an event limit per arming but gives no number. This is a
 /// conservative cap for the small click/key experiments of I-4 through I-6.
 pub const MAX_ARM_EVENTS: u32 = 20;
+/// G6 refuses the top band of the window bounds (plan review R1): the title bar with the close,
+/// minimize and zoom buttons, and a unified toolbar. The real content rect is not known offline,
+/// so this fixed height covers a standard title bar (28 pt) and a unified title bar with toolbar
+/// (52 pt). A tab bar or taller toolbar below it is not detected; the exact content area and the
+/// named zoom button wait for I-4. ReachAgentInput.swift has the same value; a static test checks it.
+pub const TITLE_BAR_BAND_POINTS: f64 = 52.0;
+/// Modifier flag bits (macOS event flags) that refuse delivery at G9 (plan review R2): Caps Lock,
+/// Shift, Control, Option, the Apple key and Fn. ReachAgentInput.swift has the same mask; a static
+/// test checks it.
+pub const HELD_MODIFIER_FLAGS_MASK: u64 =
+    0x0001_0000 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000 | 0x0080_0000;
+
+/// G9 decision for a sampled flag word: true when no modifier in the mask is down.
+pub fn modifiers_released(flags: u64) -> bool {
+    flags & HELD_MODIFIER_FLAGS_MASK == 0
+}
+
+/// G9 decision for sampled mouse buttons: true when none is down.
+pub fn mouse_buttons_released(down: &[bool]) -> bool {
+    !down.contains(&true)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -366,6 +387,10 @@ pub struct LiveFacts {
     pub target_frontmost: bool,
     pub focus_unchanged: bool,
     pub hid_idle: bool,
+    /// No modifier in `HELD_MODIFIER_FLAGS_MASK` is down (G9, plan review R2).
+    pub modifiers_released: bool,
+    /// No mouse button is down (G9, plan review R2).
+    pub mouse_buttons_released: bool,
     pub secure_input_off: bool,
     pub input_source_ok: bool,
     pub point_unoccluded: bool,
@@ -523,6 +548,11 @@ impl InputGate {
                 }
             },
         )?;
+        if let Some(p) = req.event.point() {
+            if p.y < TITLE_BAR_BAND_POINTS {
+                return Err(("G6", "point_in_title_bar"));
+            }
+        }
         let l = ctx.live;
         if req.event.point().is_some() && !l.point_unoccluded {
             return Err(("G7", "point_occluded"));
@@ -535,6 +565,12 @@ impl InputGate {
         }
         if !l.hid_idle {
             return Err(("G9", "hid_not_idle"));
+        }
+        if !l.modifiers_released {
+            return Err(("G9", "modifier_held"));
+        }
+        if !l.mouse_buttons_released {
+            return Err(("G9", "mouse_button_down"));
         }
         if !l.secure_input_off {
             return Err(("G9", "secure_input_enabled"));

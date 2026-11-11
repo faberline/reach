@@ -15,11 +15,12 @@
 // can start ReachAgent with `--enable-input` and no `--test-mode` outside CI reaches this backend,
 // and anyone who edits the source can edit the tests.
 //
-// What actually stops delivery today is that the live facts fail closed: focus, HID idle, secure
-// input, input source and occlusion are not sampled yet (plan I-3), so the gate refuses every
-// request on this backend at G7, G8 or G9 before any event could be posted. Once I-3 adds the
-// sampling this no longer holds, and only the arming, allow-list, event-count and expiry gates and
-// the user's TCC grant stand between a request and a posted event.
+// What actually stops delivery today is that the live facts fail closed: focus, HID idle, held
+// modifiers and mouse buttons, secure input, input source and occlusion are not fed into
+// `liveFacts` (I-3 adds samplers but does not wire them in; that waits for I-4), so the gate
+// refuses every request on this backend at G7, G8 or G9 before any event could be posted. Once I-4
+// wires the samples in this no longer holds, and only the arming, allow-list, event-count and
+// expiry gates and the user's TCC grant stand between a request and a posted event.
 import AppKit
 import CoreGraphics
 import Foundation
@@ -44,6 +45,17 @@ func requestPostEventAccess(_ launch: SystemInputLaunch) {
 func makeSystemInputBackend(_ launch: SystemInputLaunch) -> (sampler: InputSampler, poster: EventPoster) {
     let backend = SystemInputBackend()
     return (backend, backend)
+}
+
+/// G9 sample of held modifiers and mouse buttons (plan review R2). Read-only: it reads the HID
+/// system state, posts nothing and asks for no permission. The decisions are
+/// `modifiersReleased(flags:)` and `mouseButtonsReleased(_:)` in ReachAgentInput.swift.
+/// It is deliberately NOT called from `liveFacts` yet: both facts stay fail-closed until I-4
+/// wires every sample in at once and verifies it on a real machine.
+func sampleHeldInput() -> (modifiersReleased: Bool, mouseButtonsReleased: Bool) {
+    let flags = CGEventSource.flagsState(.hidSystemState).rawValue
+    let down = [CGMouseButton.left, .right, .center].map { CGEventSource.buttonState(.hidSystemState, button: $0) }
+    return (modifiersReleased(flags: flags), mouseButtonsReleased(down))
 }
 
 private final class SystemInputBackend: InputSampler, EventPoster {

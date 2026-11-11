@@ -50,7 +50,7 @@ fn request_json(event: Value) -> Value {
 }
 
 fn click_json() -> Value {
-    request_json(json!({"kind": "click", "button": "left", "x": 10.0, "y": 20.0}))
+    request_json(json!({"kind": "click", "button": "left", "x": 10.0, "y": 80.0}))
 }
 
 fn parse(v: &Value) -> ActionRequest {
@@ -71,6 +71,8 @@ fn live() -> LiveFacts {
         target_frontmost: true,
         focus_unchanged: true,
         hid_idle: true,
+        modifiers_released: true,
+        mouse_buttons_released: true,
         secure_input_off: true,
         input_source_ok: true,
         point_unoccluded: true,
@@ -211,7 +213,7 @@ fn parses_the_three_event_kinds() {
     assert_eq!(r.event, Event::PointerMove { x: 1.5, y: 2.0 });
     assert_eq!(
         parse(&click_json()).event,
-        Event::Click { x: 10.0, y: 20.0 }
+        Event::Click { x: 10.0, y: 80.0 }
     );
     let r = parse(&request_json(json!({"kind": "key_tap", "keycode": 36})));
     assert_eq!(r.event, Event::KeyTap { keycode: 36 });
@@ -425,7 +427,7 @@ fn replaying_the_same_request_is_refused_and_delivers_nothing() {
     let mut gate = gate_armed(now);
     let (first, sink1, fake1) = submit(&mut gate, &click_json(), now);
     assert_eq!(first.status, Status::PostedUnverified);
-    assert_eq!(fake1.calls, ["down(10,20)", "up(10,20)"]);
+    assert_eq!(fake1.calls, ["down(10,80)", "up(10,80)"]);
     assert_eq!(sink1.attempts.len(), 1);
 
     let (second, sink2, fake2) = submit(&mut gate, &click_json(), now);
@@ -443,7 +445,7 @@ fn the_same_id_with_different_content_is_refused() {
 
     // Same id "r1", a fresh observation, but another event.
     let (v, h) = with_obs(
-        request_json(json!({"kind": "click", "button": "left", "x": 11.0, "y": 20.0})),
+        request_json(json!({"kind": "click", "button": "left", "x": 11.0, "y": 80.0})),
         'b',
     );
     let (mut sink, mut fake) = (Sink::default(), Fake::default());
@@ -472,7 +474,7 @@ fn an_old_observation_cannot_authorize_the_next_event() {
     let (mut sink, mut fake) = (Sink::default(), Fake::default());
     let out = submit_latest(&mut gate, &v, now, &h, &live(), &mut sink, &mut fake);
     assert_eq!(out.status, Status::PostedUnverified);
-    assert_eq!(fake.calls, ["down(10,20)", "up(10,20)"]);
+    assert_eq!(fake.calls, ["down(10,80)", "up(10,80)"]);
 }
 
 #[test]
@@ -510,7 +512,7 @@ fn a_press_that_was_certainly_not_sent_gets_no_release() {
     let now = Instant::now();
     for (event, down) in [
         (
-            json!({"kind": "click", "button": "left", "x": 10.0, "y": 20.0}),
+            json!({"kind": "click", "button": "left", "x": 10.0, "y": 80.0}),
             "down",
         ),
         (json!({"kind": "key_tap", "keycode": 36}), "keydown"),
@@ -550,7 +552,7 @@ fn a_press_that_was_certainly_not_sent_gets_no_release() {
     let (mut sink, mut fake) = (Sink::default(), Fake::default());
     fake.fail_on = Some("move");
     fake.fail_not_sent = true;
-    let v = request_json(json!({"kind": "pointer_move", "x": 1.0, "y": 1.0}));
+    let v = request_json(json!({"kind": "pointer_move", "x": 1.0, "y": 61.0}));
     let out = submit_with(&mut gate, &v, now, &live(), &mut sink, &mut fake);
     assert_eq!(out.reason.as_deref(), Some("press_not_sent"));
 }
@@ -634,7 +636,7 @@ fn g5_observation_must_be_the_latest_and_fresh() {
 fn g6_point_must_be_inside_the_window_but_keys_have_no_point() {
     let now = Instant::now();
     let mut gate = gate_armed(now);
-    for (x, y) in [(-1.0, 5.0), (800.0, 5.0), (5.0, 600.0)] {
+    for (x, y) in [(-1.0, 60.0), (800.0, 60.0), (5.0, 600.0)] {
         let v = request_json(json!({"kind": "pointer_move", "x": x, "y": y}));
         let (out, _, fake) = submit(&mut gate, &v, now);
         refused(&out, "G6", "point_outside_window");
@@ -646,14 +648,69 @@ fn g6_point_must_be_inside_the_window_but_keys_have_no_point() {
 }
 
 #[test]
+fn g6_refuses_the_whole_title_bar_band() {
+    // Plan review R1: the content rect is not known offline, so the top band of the window
+    // (title bar, close/minimize/zoom buttons, unified toolbar) is refused as a whole.
+    assert_eq!(TITLE_BAR_BAND_POINTS, 52.0);
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    for (x, y) in [(10.0, 0.0), (70.0, 14.0), (10.0, 51.9), (400.0, 30.0)] {
+        for v in [
+            request_json(json!({"kind": "pointer_move", "x": x, "y": y})),
+            request_json(json!({"kind": "click", "button": "left", "x": x, "y": y})),
+        ] {
+            let (out, _, fake) = submit(&mut gate, &v, now);
+            refused(&out, "G6", "point_in_title_bar");
+            assert!(fake.calls.is_empty());
+        }
+    }
+    // Outside the window stays the outside reason, even above the band.
+    let v = request_json(json!({"kind": "pointer_move", "x": 10.0, "y": -1.0}));
+    let (out, _, _) = submit(&mut gate, &v, now);
+    refused(&out, "G6", "point_outside_window");
+    // The first point below the band is allowed.
+    let v = request_json(json!({"kind": "pointer_move", "x": 10.0, "y": 52.0}));
+    let (out, _, fake) = submit(&mut gate, &v, now);
+    assert_eq!(out.status, Status::PostedUnverified);
+    assert_eq!(fake.calls, ["move(10,52)"]);
+}
+
+#[test]
+fn g9_held_input_decisions() {
+    // Plan review R2: each modifier bit refuses; other bits do not.
+    assert!(modifiers_released(0));
+    for bit in [
+        0x0001_0000u64,
+        0x0002_0000,
+        0x0004_0000,
+        0x0008_0000,
+        0x0010_0000,
+        0x0080_0000,
+    ] {
+        assert!(!modifiers_released(bit), "{bit:#x}");
+        assert!(!modifiers_released(bit | 0x100), "{bit:#x}");
+    }
+    // Numeric pad and the non-coalesced bit are not held modifiers.
+    assert!(modifiers_released(0x0020_0000 | 0x100));
+    assert!(mouse_buttons_released(&[]));
+    assert!(mouse_buttons_released(&[false, false, false]));
+    assert!(!mouse_buttons_released(&[true, false, false]));
+    assert!(!mouse_buttons_released(&[false, false, true]));
+}
+
+#[test]
 fn g7_to_g9_live_conditions_each_refuse() {
     let now = Instant::now();
     type Mutation = fn(&mut LiveFacts);
-    let cases: [(&str, &str, Mutation); 6] = [
+    let cases: [(&str, &str, Mutation); 8] = [
         ("G7", "point_occluded", |l| l.point_unoccluded = false),
         ("G8", "target_not_frontmost", |l| l.target_frontmost = false),
         ("G8", "focus_changed", |l| l.focus_unchanged = false),
         ("G9", "hid_not_idle", |l| l.hid_idle = false),
+        ("G9", "modifier_held", |l| l.modifiers_released = false),
+        ("G9", "mouse_button_down", |l| {
+            l.mouse_buttons_released = false
+        }),
         ("G9", "secure_input_enabled", |l| l.secure_input_off = false),
         ("G9", "input_source_unexpected", |l| {
             l.input_source_ok = false
@@ -691,12 +748,12 @@ fn each_event_kind_posts_and_writes_attempt_then_result() {
     let now = Instant::now();
     let cases = [
         (
-            json!({"kind": "pointer_move", "x": 5.0, "y": 6.0}),
-            vec!["move(5,6)"],
+            json!({"kind": "pointer_move", "x": 5.0, "y": 66.0}),
+            vec!["move(5,66)"],
         ),
         (
-            json!({"kind": "click", "button": "left", "x": 10.0, "y": 20.0}),
-            vec!["down(10,20)", "up(10,20)"],
+            json!({"kind": "click", "button": "left", "x": 10.0, "y": 80.0}),
+            vec!["down(10,80)", "up(10,80)"],
         ),
         (
             json!({"kind": "key_tap", "keycode": 36}),
@@ -747,7 +804,7 @@ fn failure_after_press_attempts_release_once_and_reports_unknown() {
     let out = submit_with(&mut gate, &click_json(), now, &live(), &mut sink, &mut fake);
     assert_eq!(out.status, Status::DeliveryUnknown);
     assert!(out.attempted && out.release_attempted && !out.release_confirmed);
-    assert_eq!(fake.calls, ["down(10,20)", "up(10,20)"], "no retry of up");
+    assert_eq!(fake.calls, ["down(10,80)", "up(10,80)"], "no retry of up");
 
     // Key down fails: release is still attempted exactly once.
     let mut gate = gate_armed(now);
@@ -771,7 +828,7 @@ fn failure_after_button_down_releases_the_button() {
     let out = submit_with(&mut gate, &click_json(), now, &live(), &mut sink, &mut fake);
     assert_eq!(out.status, Status::DeliveryUnknown);
     assert!(out.release_attempted && out.release_confirmed);
-    assert_eq!(fake.calls, ["down(10,20)", "up(10,20)"]);
+    assert_eq!(fake.calls, ["down(10,80)", "up(10,80)"]);
 }
 
 #[test]
@@ -780,11 +837,11 @@ fn pointer_move_failure_has_nothing_to_release() {
     let mut gate = gate_armed(now);
     let (mut sink, mut fake) = (Sink::default(), Fake::default());
     fake.fail_on = Some("move");
-    let v = request_json(json!({"kind": "pointer_move", "x": 1.0, "y": 1.0}));
+    let v = request_json(json!({"kind": "pointer_move", "x": 1.0, "y": 61.0}));
     let out = submit_with(&mut gate, &v, now, &live(), &mut sink, &mut fake);
     assert_eq!(out.status, Status::DeliveryUnknown);
     assert!(!out.release_attempted);
-    assert_eq!(fake.calls, ["move(1,1)"]);
+    assert_eq!(fake.calls, ["move(1,61)"]);
 }
 
 #[test]
