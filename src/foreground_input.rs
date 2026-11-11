@@ -27,6 +27,9 @@ pub const APPROVED_BUNDLE_IDS: &[&str] = &[
 pub const MAX_ARM_TTL: Duration = Duration::from_secs(600);
 /// macOS virtual key codes handled by this model are 0 through 127.
 pub const MAX_KEYCODE: u16 = 127;
+/// Plan Q6 asks for an event limit per arming but gives no number. This is a
+/// conservative cap for the small click/key experiments of I-4 through I-6.
+pub const MAX_ARM_EVENTS: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -320,8 +323,8 @@ impl Arming {
         let expires_at = now
             .checked_add(ttl)
             .ok_or_else(|| "ttl overflows the clock".to_string())?;
-        if max_events == 0 {
-            return Err("max_events must be positive".into());
+        if max_events == 0 || max_events > MAX_ARM_EVENTS {
+            return Err(format!("max_events must be 1 through {MAX_ARM_EVENTS}"));
         }
         Ok(Self {
             bundles: bundles.iter().map(|b| b.to_string()).collect(),
@@ -347,6 +350,10 @@ impl Arming {
 pub struct InputGate {
     arming: Option<Arming>,
     halted: bool,
+    /// Every request whose `attempt` was written. A request is never run twice.
+    executed: Vec<ActionRequest>,
+    /// Observations already used for an attempt. The next event needs a new one.
+    spent_observations: BTreeSet<String>,
 }
 
 /// Facts a backend must report immediately before delivery (plan G3, G7-G9).
@@ -376,14 +383,22 @@ pub trait ReceiptSink {
     fn write_result(&mut self, record: &Value) -> Result<(), String>;
 }
 
+/// Why one delivery call failed. The backend must say `NotSent` only when it is
+/// certain the OS never received the event; anything else is `MaybeSent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostError {
+    NotSent(String),
+    MaybeSent(String),
+}
+
 /// The delivery surface. Only a test fake implements it in this crate.
 /// Coordinates are window points; mapping to the screen is a backend concern.
 pub trait EventPoster {
-    fn move_pointer(&mut self, x: f64, y: f64) -> Result<(), String>;
-    fn button_down(&mut self, x: f64, y: f64) -> Result<(), String>;
-    fn button_up(&mut self, x: f64, y: f64) -> Result<(), String>;
-    fn key_down(&mut self, keycode: u16) -> Result<(), String>;
-    fn key_up(&mut self, keycode: u16) -> Result<(), String>;
+    fn move_pointer(&mut self, x: f64, y: f64) -> Result<(), PostError>;
+    fn button_down(&mut self, x: f64, y: f64) -> Result<(), PostError>;
+    fn button_up(&mut self, x: f64, y: f64) -> Result<(), PostError>;
+    fn key_down(&mut self, keycode: u16) -> Result<(), PostError>;
+    fn key_up(&mut self, keycode: u16) -> Result<(), PostError>;
     /// Identity, window and focus re-check after delivery.
     fn verify_after(&mut self) -> Result<(), String>;
 }
@@ -440,7 +455,7 @@ impl InputGate {
     pub fn armed(arming: Arming) -> Self {
         Self {
             arming: Some(arming),
-            halted: false,
+            ..Self::default()
         }
     }
 
@@ -458,6 +473,16 @@ impl InputGate {
         }
         if arming.remaining == 0 {
             return Err(("G1", "event_limit_reached"));
+        }
+        if let Some(done) = self.executed.iter().find(|r| r.id == req.id) {
+            return Err(if done == req {
+                ("G13", "request_already_executed")
+            } else {
+                ("G13", "request_id_reused")
+            });
+        }
+        if self.spent_observations.contains(&req.observation_sha256) {
+            return Err(("G5", "observation_already_used"));
         }
         if !arming.bundles.contains(&req.target.bundle_id) {
             return Err(("G2", "bundle_not_allowed"));
@@ -553,6 +578,10 @@ impl InputGate {
         if let Some(a) = self.arming.as_mut() {
             a.remaining -= 1;
         }
+        // From here the request and its observation are spent, whatever happens.
+        self.executed.push(req.clone());
+        self.spent_observations
+            .insert(req.observation_sha256.clone());
         let mut out = Outcome {
             id: req.id.clone(),
             status: Status::PostedUnverified,
@@ -582,18 +611,38 @@ fn mark_unknown(out: &mut Outcome, gate: &'static str, reason: &str) {
     out.reason = Some(reason.to_string());
 }
 
-/// One synchronous press/release. A failure after a press attempts one release
-/// (cleanup, not a retry of the event) and ends as `delivery_unknown`.
+/// The backend certainly sent nothing: no event reached the OS, so the request
+/// ends as `refused` (the attempt receipt still exists and the count is spent).
+fn mark_not_sent(out: &mut Outcome) {
+    out.status = Status::Refused;
+    out.gate = Some("G10");
+    out.reason = Some("press_not_sent".to_string());
+}
+
+/// One synchronous press/release. A failure after a press that may have been
+/// sent attempts one release (cleanup, not a retry of the event) and ends as
+/// `delivery_unknown`. A press that certainly was not sent gets no release,
+/// since an unpaired release would itself be a stray event.
 fn deliver(event: Event, poster: &mut dyn EventPoster, out: &mut Outcome) {
-    let (pressed, released) = match event {
-        Event::PointerMove { x, y } => {
-            if poster.move_pointer(x, y).is_err() {
-                mark_unknown(out, "G10", "post_failed");
-            }
-            return;
+    let pressed = match event {
+        Event::PointerMove { x, y } => poster.move_pointer(x, y),
+        Event::Click { x, y } => poster.button_down(x, y),
+        Event::KeyTap { keycode } => poster.key_down(keycode),
+    };
+    if let Err(PostError::NotSent(_)) = pressed {
+        mark_not_sent(out);
+        return;
+    }
+    if matches!(event, Event::PointerMove { .. }) {
+        if pressed.is_err() {
+            mark_unknown(out, "G10", "post_failed");
         }
-        Event::Click { x, y } => (poster.button_down(x, y), poster.button_up(x, y)),
-        Event::KeyTap { keycode } => (poster.key_down(keycode), poster.key_up(keycode)),
+        return;
+    }
+    let released = match event {
+        Event::Click { x, y } => poster.button_up(x, y),
+        Event::KeyTap { keycode } => poster.key_up(keycode),
+        Event::PointerMove { .. } => return,
     };
     out.release_attempted = true;
     out.release_confirmed = released.is_ok();

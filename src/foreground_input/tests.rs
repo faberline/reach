@@ -106,31 +106,38 @@ struct Fake {
     calls: Vec<String>,
     fail_on: Option<&'static str>,
     fail_verify: bool,
+    /// The failing call certainly sent nothing (`PostError::NotSent`).
+    fail_not_sent: bool,
 }
 impl Fake {
-    fn step(&mut self, name: &'static str, detail: String) -> Result<(), String> {
+    fn step(&mut self, name: &'static str, detail: String) -> Result<(), PostError> {
         self.calls.push(format!("{name}{detail}"));
         if self.fail_on == Some(name) {
-            Err(format!("{name} failed"))
+            let why = format!("{name} failed");
+            Err(if self.fail_not_sent {
+                PostError::NotSent(why)
+            } else {
+                PostError::MaybeSent(why)
+            })
         } else {
             Ok(())
         }
     }
 }
 impl EventPoster for Fake {
-    fn move_pointer(&mut self, x: f64, y: f64) -> Result<(), String> {
+    fn move_pointer(&mut self, x: f64, y: f64) -> Result<(), PostError> {
         self.step("move", format!("({x},{y})"))
     }
-    fn button_down(&mut self, x: f64, y: f64) -> Result<(), String> {
+    fn button_down(&mut self, x: f64, y: f64) -> Result<(), PostError> {
         self.step("down", format!("({x},{y})"))
     }
-    fn button_up(&mut self, x: f64, y: f64) -> Result<(), String> {
+    fn button_up(&mut self, x: f64, y: f64) -> Result<(), PostError> {
         self.step("up", format!("({x},{y})"))
     }
-    fn key_down(&mut self, keycode: u16) -> Result<(), String> {
+    fn key_down(&mut self, keycode: u16) -> Result<(), PostError> {
         self.step("keydown", format!("({keycode})"))
     }
-    fn key_up(&mut self, keycode: u16) -> Result<(), String> {
+    fn key_up(&mut self, keycode: u16) -> Result<(), PostError> {
         self.step("keyup", format!("({keycode})"))
     }
     fn verify_after(&mut self) -> Result<(), String> {
@@ -150,7 +157,20 @@ fn submit_with(
     sink: &mut Sink,
     fake: &mut Fake,
 ) -> Outcome {
-    let obs = observation(now);
+    submit_latest(gate, req, now, &sha(), live, sink, fake)
+}
+
+/// Like `submit_with`, but the latest observation has the given hash.
+fn submit_latest(
+    gate: &mut InputGate,
+    req: &Value,
+    now: Instant,
+    latest_sha: &str,
+    live: &LiveFacts,
+    sink: &mut Sink,
+    fake: &mut Fake,
+) -> Outcome {
+    let obs = Observation::new(window(), 123.5, latest_sha.to_string(), now, 1).unwrap();
     let cur = current();
     let ctx = Context {
         latest: &obs,
@@ -159,6 +179,13 @@ fn submit_with(
         now,
     };
     gate.submit(&parse(req), &ctx, sink, fake)
+}
+
+/// A request that carries a fresh observation hash `c` repeated 64 times.
+fn with_obs(mut v: Value, c: char) -> (Value, String) {
+    let h = c.to_string().repeat(64);
+    v["observation"]["image_sha256"] = json!(h);
+    (v, h)
 }
 
 fn submit(gate: &mut InputGate, req: &Value, now: Instant) -> (Outcome, Sink, Fake) {
@@ -355,13 +382,173 @@ fn g1_expired_or_exhausted_arming_refuses() {
     assert!(fake.calls.is_empty() && sink.attempts.is_empty());
 
     let mut gate = gate_armed(now);
-    for _ in 0..3 {
-        let (out, _, _) = submit(&mut gate, &click_json(), now);
-        assert_eq!(out.status, Status::PostedUnverified);
+    for (i, c) in ['1', '2', '3'].into_iter().enumerate() {
+        let (v, h) = with_obs(click_json(), c);
+        v_id(&mut gate, v, &h, now, i, Status::PostedUnverified);
     }
-    let (out, _, fake) = submit(&mut gate, &click_json(), now);
+    let (v, h) = with_obs(click_json(), '4');
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    let mut v = v;
+    v["id"] = json!("r4");
+    let out = submit_latest(&mut gate, &v, now, &h, &live(), &mut sink, &mut fake);
     refused(&out, "G1", "event_limit_reached");
     assert!(fake.calls.is_empty());
+}
+
+/// Submit `v` under the unique id `r{i}` with matching latest observation `h`.
+fn v_id(gate: &mut InputGate, mut v: Value, h: &str, now: Instant, i: usize, want: Status) {
+    v["id"] = json!(format!("r{i}"));
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    let out = submit_latest(gate, &v, now, h, &live(), &mut sink, &mut fake);
+    assert_eq!(out.status, want, "{out:?}");
+}
+
+// ---- replay (review: the same request must never be delivered twice) ----
+
+#[test]
+fn replaying_the_same_request_is_refused_and_delivers_nothing() {
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    let (first, sink1, fake1) = submit(&mut gate, &click_json(), now);
+    assert_eq!(first.status, Status::PostedUnverified);
+    assert_eq!(fake1.calls, ["down(10,20)", "up(10,20)"]);
+    assert_eq!(sink1.attempts.len(), 1);
+
+    let (second, sink2, fake2) = submit(&mut gate, &click_json(), now);
+    refused(&second, "G13", "request_already_executed");
+    assert!(fake2.calls.is_empty() && sink2.attempts.is_empty());
+    assert_eq!(gate.remaining_events(), Some(2), "a refusal costs nothing");
+}
+
+#[test]
+fn the_same_id_with_different_content_is_refused() {
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    let (first, _, _) = submit(&mut gate, &click_json(), now);
+    assert_eq!(first.status, Status::PostedUnverified);
+
+    // Same id "r1", a fresh observation, but another event.
+    let (v, h) = with_obs(
+        request_json(json!({"kind": "click", "button": "left", "x": 11.0, "y": 20.0})),
+        'b',
+    );
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    let out = submit_latest(&mut gate, &v, now, &h, &live(), &mut sink, &mut fake);
+    refused(&out, "G13", "request_id_reused");
+    assert!(fake.calls.is_empty() && sink.attempts.is_empty());
+}
+
+#[test]
+fn an_old_observation_cannot_authorize_the_next_event() {
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    let (first, _, _) = submit(&mut gate, &click_json(), now);
+    assert_eq!(first.status, Status::PostedUnverified);
+
+    // New id, same observation hash (still the latest one the backend holds).
+    let mut v = click_json();
+    v["id"] = json!("r2");
+    let (out, sink, fake) = submit(&mut gate, &v, now);
+    refused(&out, "G5", "observation_already_used");
+    assert!(fake.calls.is_empty() && sink.attempts.is_empty());
+
+    // A new observation and a new id go through.
+    let (mut v, h) = with_obs(click_json(), 'c');
+    v["id"] = json!("r3");
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    let out = submit_latest(&mut gate, &v, now, &h, &live(), &mut sink, &mut fake);
+    assert_eq!(out.status, Status::PostedUnverified);
+    assert_eq!(fake.calls, ["down(10,20)", "up(10,20)"]);
+}
+
+#[test]
+fn a_request_that_failed_to_record_its_attempt_is_not_spent() {
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    sink.fail_attempt = true;
+    let out = submit_with(&mut gate, &click_json(), now, &live(), &mut sink, &mut fake);
+    refused(&out, "G12", "attempt_not_recorded");
+    // Nothing was delivered, so the same request may be submitted once more.
+    let (out, _, fake) = submit(&mut gate, &click_json(), now);
+    assert_eq!(out.status, Status::PostedUnverified);
+    assert_eq!(fake.calls.len(), 2);
+}
+
+#[test]
+fn a_failed_delivery_also_spends_the_request_and_observation() {
+    let now = Instant::now();
+    let mut gate = gate_armed(now);
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    fake.fail_on = Some("up");
+    let out = submit_with(&mut gate, &click_json(), now, &live(), &mut sink, &mut fake);
+    assert_eq!(out.status, Status::DeliveryUnknown);
+    // The gate halts; the halt is reported before the replay checks.
+    let (out, _, fake) = submit(&mut gate, &click_json(), now);
+    refused(&out, "G13", "halted_after_delivery_unknown");
+    assert!(fake.calls.is_empty());
+}
+
+// ---- review items: down certainly not sent, event cap ----
+
+#[test]
+fn a_press_that_was_certainly_not_sent_gets_no_release() {
+    let now = Instant::now();
+    for (event, down) in [
+        (
+            json!({"kind": "click", "button": "left", "x": 10.0, "y": 20.0}),
+            "down",
+        ),
+        (json!({"kind": "key_tap", "keycode": 36}), "keydown"),
+    ] {
+        let mut gate = gate_armed(now);
+        let (mut sink, mut fake) = (Sink::default(), Fake::default());
+        fake.fail_on = Some(down);
+        fake.fail_not_sent = true;
+        let out = submit_with(
+            &mut gate,
+            &request_json(event),
+            now,
+            &live(),
+            &mut sink,
+            &mut fake,
+        );
+        assert_eq!(out.status, Status::Refused, "{out:?}");
+        assert_eq!(out.gate, Some("G10"));
+        assert_eq!(out.reason.as_deref(), Some("press_not_sent"));
+        assert!(out.attempted && !out.release_attempted);
+        assert_eq!(
+            fake.calls.len(),
+            1,
+            "no up/keyup after a press that never left"
+        );
+        assert_eq!(sink.results[0]["status"], "refused");
+        // Not unknown: the gate is not halted, and the spent request stays spent.
+        let (v, h) = with_obs(click_json(), 'd');
+        let mut v = v;
+        v["id"] = json!("r9");
+        let (mut sink, mut fake) = (Sink::default(), Fake::default());
+        let out = submit_latest(&mut gate, &v, now, &h, &live(), &mut sink, &mut fake);
+        assert_eq!(out.status, Status::PostedUnverified);
+    }
+    // Pointer moves have no release either way.
+    let mut gate = gate_armed(now);
+    let (mut sink, mut fake) = (Sink::default(), Fake::default());
+    fake.fail_on = Some("move");
+    fake.fail_not_sent = true;
+    let v = request_json(json!({"kind": "pointer_move", "x": 1.0, "y": 1.0}));
+    let out = submit_with(&mut gate, &v, now, &live(), &mut sink, &mut fake);
+    assert_eq!(out.reason.as_deref(), Some("press_not_sent"));
+}
+
+#[test]
+fn arming_caps_the_event_count() {
+    let now = Instant::now();
+    let ttl = Duration::from_secs(600);
+    assert!(Arming::new(&[SAFARI], &[36], now, ttl, MAX_ARM_EVENTS).is_ok());
+    assert!(Arming::new(&[SAFARI], &[36], now, ttl, MAX_ARM_EVENTS + 1).is_err());
+    assert!(Arming::new(&[SAFARI], &[36], now, ttl, u32::MAX).is_err());
+    assert_eq!(MAX_ARM_EVENTS, 20);
 }
 
 #[test]
@@ -537,8 +724,8 @@ fn attempt_record_binds_the_request_and_precedes_delivery() {
 #[test]
 fn failure_after_press_attempts_release_once_and_reports_unknown() {
     let now = Instant::now();
-    // The release itself succeeds after a failed verification step is not
-    // the case here: `down` succeeds, then `up` is the failing call.
+    // Click: `down` goes out and `up` is the failing call. It is attempted
+    // exactly once and not repeated.
     let mut gate = gate_armed(now);
     let (mut sink, mut fake) = (Sink::default(), Fake::default());
     fake.fail_on = Some("up");
