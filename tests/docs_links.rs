@@ -128,6 +128,10 @@ fn docs_state_how_input_mode_starts_and_that_it_is_off_by_default() {
         "delivery_unknown",
         "events_remaining",
         "從未實際執行過",
+        "不是安全邊界",
+        "防誤用",
+        "加入取樣後",
+        "18、23、36、38、44、49",
     ] {
         assert!(
             service.contains(needle),

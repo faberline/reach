@@ -501,10 +501,72 @@ fn the_system_backend_is_reached_only_through_the_startup_guard() {
             "{file}: requestPostEventAccess calls"
         );
     }
-    // Start-up passes the real environment and fails closed under CI.
-    let agent = read("ReachAgent.swift");
-    assert!(agent.contains(
-        "SystemInputLaunch.authorize(enableInput: true, testMode: false, environment: environment)"
+    // `authorize` reads the process environment itself; no caller can hand it one.
+    assert!(authorize.contains("ProcessInfo.processInfo.environment[\"CI\"]"));
+    assert!(system.contains(
+        "static func authorize(enableInput: Bool, testMode: Bool) -> SystemInputLaunch?"
     ));
+    let agent = read("ReachAgent.swift");
     assert!(agent.contains("input_unavailable"));
+}
+
+/// Every call site of the start-up guard and of `makeInputController`, as exact lines.
+/// This is a guard against mistakes, not a security boundary: it fails when a new call
+/// appears (for example a self-test that reaches the system path with `testMode: false`).
+#[test]
+fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
+    let expected: &[(&str, &[&str])] = &[
+        (
+            "SystemInputLaunch.authorize(",
+            &[
+                "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,",
+                "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,",
+                "ReachAgent.swift: guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {",
+            ],
+        ),
+        (
+            "makeInputController(",
+            &[
+                "ReachAgent.swift: let made = try? makeInputController(testConfig)",
+                "ReachAgent.swift: (try? makeInputController(ServeConfig(socket: \"/tmp/x\", testMode: true, input: nil)))",
+                "ReachAgent.swift: func makeInputController(_ config: ServeConfig) throws -> (",
+                "ReachAgent.swift: let input = try makeInputController(config)",
+            ],
+        ),
+    ];
+    let files = reach_agent_swift_files();
+    for (needle, lines) in expected {
+        let mut found = Vec::new();
+        for file in &files {
+            for line in read(file)
+                .lines()
+                .filter(|l| l.contains(needle) && !l.trim_start().starts_with("//"))
+            {
+                found.push(format!("{file}: {}", line.trim()));
+            }
+        }
+        assert_eq!(found, *lines, "call sites of {needle}");
+    }
+}
+
+/// The Rust model and the Swift agent accept the same six keycodes (plan 1.3, Q10).
+#[test]
+fn rust_and_swift_approve_the_same_keycodes() {
+    let swift = read("ReachAgentInput.swift");
+    let line = swift
+        .lines()
+        .find(|l| l.starts_with("let approvedInputKeycodes = ["))
+        .expect("approvedInputKeycodes exists");
+    let list: Vec<u16> = line
+        .split('[')
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .unwrap()
+        .split(',')
+        .map(|n| n.trim().parse().unwrap())
+        .collect();
+    assert_eq!(list, mac_computer_use::foreground_input::APPROVED_KEYCODES);
+    for modifier in 54..=63 {
+        assert!(!list.contains(&modifier), "modifier {modifier} is approved");
+    }
 }

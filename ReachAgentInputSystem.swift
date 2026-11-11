@@ -4,18 +4,22 @@
 // permission request; tests/foreground_input_static.rs scans every Swift file that the
 // build scripts compile and fails if one appears anywhere else.
 //
-// It is compiled in, but nothing can reach it unless all of these hold at start-up:
-//   - ReachAgent runs `--serve` with `--enable-input` and its arming options,
-//   - `--test-mode` is absent,
-//   - the environment has no non-empty `CI` variable.
-// `SystemInputLaunch.authorize` checks the three conditions. Its initializer is fileprivate,
-// so no other file can make a `SystemInputLaunch`, and `makeSystemInputBackend` and
-// `requestPostEventAccess` both require one. `--self-test` asserts that `authorize`
-// returns nil in test mode, under CI and without input.
+// It is compiled in. `SystemInputLaunch.authorize` yields a launch only when ReachAgent runs
+// `--serve --enable-input` with its arming options, without `--test-mode`, and the process
+// environment (read here, never passed in) has no non-empty `CI` variable. Its initializer is
+// fileprivate, so no other file can make a `SystemInputLaunch`, and `makeSystemInputBackend` and
+// `requestPostEventAccess` both require one.
 //
-// The live facts are fail-closed today: focus, HID idle, secure input, input source and
-// occlusion are not sampled yet (plan I-3), so the gate refuses every request on this
-// backend at G7, G8 or G9 before any event could be posted.
+// These checks, and the static tests that list every call site of `SystemInputLaunch.authorize(`
+// and `makeInputController(`, are guards against mistakes, not a security boundary: anyone who
+// can start ReachAgent with `--enable-input` and no `--test-mode` outside CI reaches this backend,
+// and anyone who edits the source can edit the tests.
+//
+// What actually stops delivery today is that the live facts fail closed: focus, HID idle, secure
+// input, input source and occlusion are not sampled yet (plan I-3), so the gate refuses every
+// request on this backend at G7, G8 or G9 before any event could be posted. Once I-3 adds the
+// sampling this no longer holds, and only the arming, allow-list, event-count and expiry gates and
+// the user's TCC grant stand between a request and a posted event.
 import AppKit
 import CoreGraphics
 import Foundation
@@ -24,9 +28,9 @@ import Foundation
 struct SystemInputLaunch {
     fileprivate init() {}
 
-    static func authorize(enableInput: Bool, testMode: Bool, environment: [String: String]) -> SystemInputLaunch? {
+    static func authorize(enableInput: Bool, testMode: Bool) -> SystemInputLaunch? {
         guard enableInput, !testMode else { return nil }
-        if let ci = environment["CI"], !ci.isEmpty { return nil }
+        if let ci = ProcessInfo.processInfo.environment["CI"], !ci.isEmpty { return nil }
         return SystemInputLaunch()
     }
 }

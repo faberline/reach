@@ -17,7 +17,10 @@ let inputMethods = ["action"]
 let approvedInputBundleIds = ["org.local.rust-computer-use.target-event-fixture", "com.apple.Safari"]
 let maxInputArmSeconds = 600
 let maxInputEvents = 20
-let maxInputKeycode = 127
+/// The only virtual key codes v1 may send (plan 1.3 and Q10): 18, 23, 38, 44 (the Zhuyin keys),
+/// 49 (space) and 36 (Return). No modifier (54-63, with Fn and Caps Lock), no function or system
+/// key. `APPROVED_KEYCODES` in src/foreground_input.rs is the same list; a static test checks it.
+let approvedInputKeycodes = [18, 23, 36, 38, 44, 49]
 let maxObservationAgeNs: UInt64 = 10_000_000_000
 let inputAttemptSchema = "reach-input-attempt-v1"
 let inputResultSchema = "reach-input-result-v1"
@@ -86,7 +89,10 @@ func parseServeArguments(_ args: [String]) throws -> ServeConfig {
             if options.bundles.contains(bundle) { throw UsageError("a bundle id appears twice") }
             options.bundles.append(bundle)
         case "--allow-keycode":
-            let keycode = try integer(flag, 0...maxInputKeycode)
+            let keycode = try integer(flag, 0...127)
+            guard approvedInputKeycodes.contains(keycode) else {
+                throw UsageError("--allow-keycode accepts only \(approvedInputKeycodes.map(String.init).joined(separator: ", "))")
+            }
             if options.keycodes.contains(keycode) { throw UsageError("a keycode appears twice") }
             options.keycodes.append(keycode)
         case "--input-ttl-seconds":
@@ -127,7 +133,7 @@ struct InputArming {
     init?(_ options: InputOptions, nowNs: UInt64, nowUnixSeconds: Double) {
         guard !options.bundles.isEmpty,
             options.bundles.allSatisfy({ approvedInputBundleIds.contains($0) }),
-            options.keycodes.allSatisfy({ (0...maxInputKeycode).contains($0) }),
+            options.keycodes.allSatisfy({ approvedInputKeycodes.contains($0) }),
             (1...maxInputArmSeconds).contains(options.ttlSeconds),
             (1...maxInputEvents).contains(options.maxEvents)
         else { return nil }
@@ -262,8 +268,8 @@ func parseActionParams(id: String, _ params: Any?) -> Result<InputRequest, Input
             event = .click(x: try number(o, "x"), y: try number(o, "y"))
         case "key_tap":
             let o = try object(e, "event", ["kind", "keycode"])
-            guard let keycode = isPlainInteger(o["keycode"]), keycode <= maxInputKeycode else {
-                throw schemaRejection("event.keycode must be 0 through 127")
+            guard let keycode = isPlainInteger(o["keycode"]), approvedInputKeycodes.contains(keycode) else {
+                throw schemaRejection("event.keycode is not an approved key")
             }
             event = .keyTap(keycode: keycode)
         default:
@@ -797,6 +803,20 @@ func inputSelfCheck() -> [String] {
     let parsed = try? parseServeArguments(full)
     check(parsed?.input == InputOptions(bundles: [fixtureBundleId], keycodes: [18], ttlSeconds: 60, maxEvents: 3),
         "--enable-input parses its options")
+    check(approvedInputKeycodes == [18, 23, 36, 38, 44, 49], "the approved keycodes are the six plan keys")
+    for key in approvedInputKeycodes {
+        let args = base + ["--enable-input", "--allow-bundle", fixtureBundleId, "--allow-keycode", String(key),
+            "--input-ttl-seconds", "60", "--max-input-events", "3"]
+        check((try? parseServeArguments(args))?.input?.keycodes == [key], "--allow-keycode \(key) is accepted")
+    }
+    // Modifiers (54-63, with Fn 63 and Caps Lock 57), function keys and every other key are refused.
+    for key in [0, 3, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 103, 122, 127] {
+        let args = base + ["--enable-input", "--allow-bundle", fixtureBundleId, "--allow-keycode", String(key),
+            "--input-ttl-seconds", "60", "--max-input-events", "3"]
+        check((try? parseServeArguments(args)) == nil, "--allow-keycode \(key) is refused")
+        let k = InputOptions(bundles: [fixtureBundleId], keycodes: [key], ttlSeconds: 60, maxEvents: 3)
+        check(InputArming(k, nowNs: 1, nowUnixSeconds: 1) == nil, "an arming with keycode \(key) is refused")
+    }
     for bad in [
         base + ["--allow-bundle", fixtureBundleId],
         base + ["--input-ttl-seconds", "60"],
@@ -870,6 +890,11 @@ func inputSelfCheck() -> [String] {
         (extra, "an unknown top-level field"),
         (params(["kind": "key_tap", "keycode": 18, "modifiers": ["cmd"]]), "a modifier field"),
         (params(["kind": "key_tap", "keycode": 128]), "keycode 128"),
+        (params(["kind": "key_tap", "keycode": 55]), "the Command key"),
+        (params(["kind": "key_tap", "keycode": 57]), "Caps Lock"),
+        (params(["kind": "key_tap", "keycode": 63]), "the Fn key"),
+        (params(["kind": "key_tap", "keycode": 103]), "F11"),
+        (params(["kind": "key_tap", "keycode": 0]), "a key outside the plan"),
         (params(["kind": "click", "button": "right", "x": 1, "y": 1]), "the right button"),
         (params(["kind": "scroll", "dy": 1]), "a scroll event"),
         (params(["kind": "drag", "x": 1, "y": 1]), "a drag event"),

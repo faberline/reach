@@ -6,9 +6,9 @@
 
 ## 範圍
 
-- 三種事件：`pointer_move`、`click`（只接受左鍵、視窗內點座標）、`key_tap`（鍵碼 0 至 127、無修飾鍵）。沒有拖曳、滾輪、修飾鍵、文字輸入、啟用 App。
+- 三種事件：`pointer_move`、`click`（只接受左鍵、視窗內點座標）、`key_tap`（只接受計畫 1.3 的六個鍵碼 18、23、36、38、44、49；修飾鍵 54 至 63、功能鍵與系統鍵一律拒絕）。沒有拖曳、滾輪、修飾鍵、文字輸入、啟用 App。
 - 請求欄位嚴格比對，任何未知欄位都拒絕（`refused`，閘門 `schema`）。`delivery` 只接受 `foreground`；`background` 回報 `unsupported`（閘門 `delivery`）。
-- 允許清單只有 `org.local.rust-computer-use.target-event-fixture` 與 `com.apple.Safari`；Chrome 未核准。`Arming::new` 拒絕清單外的 bundle id（沒有萬用字元）、超過 10 分鐘的到期、零事件數或超過 `MAX_ARM_EVENTS`（20）的事件數、大於 127 的鍵碼。計畫 Q6 只要求每次啟用設事件數上限、沒有給數字；20 是為 I-4 至 I-6 的少量單擊與按鍵實驗選的保守上限，實機核准時可再調。
+- 允許清單只有 `org.local.rust-computer-use.target-event-fixture` 與 `com.apple.Safari`；Chrome 未核准。`Arming::new` 拒絕清單外的 bundle id（沒有萬用字元）、超過 10 分鐘的到期、零事件數或超過 `MAX_ARM_EVENTS`（20）的事件數、`APPROVED_KEYCODES` 以外的鍵碼。計畫 Q6 只要求每次啟用設事件數上限、沒有給數字；20 是為 I-4 至 I-6 的少量單擊與按鍵實驗選的保守上限，實機核准時可再調。
 - 四種狀態與結束碼：`unsupported`（3）、`refused`（1）、`posted_unverified`（3）、`delivery_unknown`（1）。
 
 ## 閘門

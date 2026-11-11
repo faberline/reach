@@ -875,36 +875,32 @@ func selfTest() -> Never {
     for failure in accessibilitySelfCheck() { failures.append("accessibility self-check: \(failure)") }
     for failure in inputSelfCheck() { failures.append("input self-check: \(failure)") }
 
-    // The system input backend is unreachable in test mode, under CI and without input.
-    check(SystemInputLaunch.authorize(enableInput: true, testMode: true, environment: [:]) == nil,
+    // `authorize` never yields a launch in test mode or without input. The CI check reads the
+    // real process environment, so the self-test cannot exercise it without taking the system
+    // path; tests/foreground_input_static.rs checks it statically instead, and lists every call.
+    check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,
         "test mode never authorizes the system input backend")
-    check(SystemInputLaunch.authorize(enableInput: true, testMode: false, environment: ["CI": "true"]) == nil,
-        "CI never authorizes the system input backend")
-    check(SystemInputLaunch.authorize(enableInput: false, testMode: false, environment: [:]) == nil,
+    check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,
         "no --enable-input never authorizes the system input backend")
-    let ciConfig = try? parseServeArguments([
+    // The argument layer: `--enable-input` without `--test-mode` parses to the system path, and
+    // with `--test-mode` to the fake one. The self-test never builds the system path.
+    let armedArguments = [
         "--serve", "--socket", "/tmp/x", "--enable-input", "--allow-bundle", fixtureBundleId,
         "--input-ttl-seconds", "60", "--max-input-events", "1",
-    ])
-    if let ciConfig = ciConfig {
-        do {
-            _ = try makeInputController(ciConfig, environment: ["CI": "1"])
-            failures.append("--enable-input without --test-mode started under CI")
-        } catch let error as AgentError {
-            check(error.code == "input_unavailable", "--enable-input under CI fails at start-up")
-        } catch {
-            failures.append("unexpected start-up error under CI")
-        }
-        var testConfig = ciConfig
-        testConfig = ServeConfig(socket: ciConfig.socket, testMode: true, input: ciConfig.input)
-        let made = try? makeInputController(testConfig, environment: ["CI": "1"])
+    ]
+    let systemConfig = try? parseServeArguments(armedArguments)
+    check(systemConfig?.testMode == false && systemConfig?.input != nil,
+        "--enable-input without --test-mode parses to the system path")
+    if let testConfig = try? parseServeArguments(armedArguments + ["--test-mode"]) {
+        check(testConfig.testMode && testConfig.input != nil, "--test-mode --enable-input keeps the arming")
+        let made = try? makeInputController(testConfig)
         check(made?.controller?.backendName == "fake" && made?.launch == nil, "--test-mode --enable-input uses the fake backend")
         check(
-            (try? makeInputController(ServeConfig(socket: "/tmp/x", testMode: false, input: nil), environment: [:]))
+            (try? makeInputController(ServeConfig(socket: "/tmp/x", testMode: true, input: nil)))
                 .map { $0.controller == nil && $0.launch == nil } == true,
             "without --enable-input there is no input controller")
     } else {
-        failures.append("the CI configuration did not parse")
+        failures.append("the test-mode input configuration did not parse")
     }
     check((try? parseRequested(["permissions": ["post_event"]], inputEnabled: true)) == ["post_event"],
         "post_event is requestable only with input enabled")
@@ -1056,7 +1052,7 @@ func usage(_ problem: String? = nil) -> Never {
         """
         usage: ReachAgent --self-test
                ReachAgent --serve --socket <absolute path> [--test-mode]
-                   [--enable-input --allow-bundle <bundle id>... [--allow-keycode <0-127>...]
+                   [--enable-input --allow-bundle <bundle id>... [--allow-keycode <18|23|36|38|44|49>...]
                     --input-ttl-seconds <1-600> --max-input-events <1-20>]
         Input is disabled unless --enable-input is given. Allowed bundle ids: \(approvedInputBundleIds.joined(separator: ", ")).
 
@@ -1067,7 +1063,7 @@ func usage(_ problem: String? = nil) -> Never {
 /// The input controller for `--serve`, or nil when input is not enabled. The system backend
 /// is used only when `SystemInputLaunch.authorize` allows it; `--test-mode` gets the fake
 /// backend, and under CI start-up fails.
-func makeInputController(_ config: ServeConfig, environment: [String: String]) throws -> (
+func makeInputController(_ config: ServeConfig) throws -> (
     controller: InputController?, launch: SystemInputLaunch?
 ) {
     guard let options = config.input else { return (nil, nil) }
@@ -1078,8 +1074,7 @@ func makeInputController(_ config: ServeConfig, environment: [String: String]) t
     if config.testMode {
         return (makeFakeInputController(arming: arming, now: monotonicNs).controller, nil)
     }
-    guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false, environment: environment)
-    else {
+    guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {
         throw AgentError("input_unavailable", "--enable-input without --test-mode is refused under CI")
     }
     let system = makeSystemInputBackend(launch)
@@ -1103,7 +1098,7 @@ struct ReachAgent {
         let testMode = config.testMode
         signal(SIGPIPE, SIG_IGN)
         do {
-            let input = try makeInputController(config, environment: ProcessInfo.processInfo.environment)
+            let input = try makeInputController(config)
             let listener = try makeListener(path: config.socket)
             let provider: PermissionProvider =
                 testMode ? TestPermissionProvider() : SystemPermissionProvider(inputLaunch: input.launch)

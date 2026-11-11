@@ -366,7 +366,8 @@ fn input_block(block: &Value) -> Option<Value> {
     let keycodes = o.get("allowed_keycodes")?.as_array()?;
     if !keycodes.iter().all(|k| {
         k.as_u64()
-            .is_some_and(|k| k <= u64::from(crate::foreground_input::MAX_KEYCODE))
+            .and_then(|k| u16::try_from(k).ok())
+            .is_some_and(|k| crate::foreground_input::APPROVED_KEYCODES.contains(&k))
     }) {
         return None;
     }
@@ -892,7 +893,7 @@ mod tests {
     fn input_block_is_checked_key_by_key() {
         let armed = json!({"state": "armed", "backend": "fake",
             "allowed_bundle_ids": ["org.local.rust-computer-use.target-event-fixture"],
-            "allowed_keycodes": [0, 36], "expires_unix_seconds": 1.5e9,
+            "allowed_keycodes": [18, 36], "expires_unix_seconds": 1.5e9,
             "events_remaining": 2, "halted": false, "verified": false});
         assert_eq!(input_block(&armed), Some(armed.clone()));
         let off = json!({"state": "disabled", "backend": "system"});
@@ -902,6 +903,8 @@ mod tests {
             ("backend", json!("cgevent")),
             ("allowed_bundle_ids", json!(["com.google.Chrome"])),
             ("allowed_keycodes", json!([128])),
+            ("allowed_keycodes", json!([55])),
+            ("allowed_keycodes", json!([0])),
             ("events_remaining", json!(-1)),
             ("halted", json!("no")),
             ("verified", json!(true)),
