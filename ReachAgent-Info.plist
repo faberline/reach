@@ -23,6 +23,6 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>Reach 需要螢幕錄製權限，才能擷取其他 App 視窗的畫面。</string>
     <key>ReachPostEventUsageDescription</key>
-    <string>Reach 的事件送出權限目前不使用：輸入功能停用，不會送出任何事件。</string>
+    <string>Reach 預設不送出任何輸入事件。只有在以 --enable-input 啟動、且目標為核准的 App 時，ReachAgent 才會使用事件送出權限，對該 App 送出單一點擊或按鍵。</string>
 </dict>
 </plist>

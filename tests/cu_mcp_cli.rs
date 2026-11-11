@@ -144,11 +144,13 @@ fn tools_match_the_describe_of_the_real_cu_agent() {
     let mut expected: Vec<&str> = methods
         .iter()
         .filter(|(_, e)| executable_fields(e).is_empty() || e.get("agent_fields").is_some())
+        // Input methods are never MCP tools (plan I-2).
+        .filter(|(name, _)| name.as_str() != "action")
         .map(|(name, _)| name.as_str())
         .collect();
     expected.sort();
     assert_eq!(names, expected);
-    assert!(names.contains(&"action") && names.contains(&"describe"));
+    assert!(!names.contains(&"action") && names.contains(&"describe"));
     assert!(names.contains(&"capture") && !names.contains(&"recognize_text"));
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
@@ -163,7 +165,7 @@ fn tools_match_the_describe_of_the_real_cu_agent() {
 }
 
 #[test]
-fn every_method_is_offered_once_its_helpers_are_fixed() {
+fn every_non_input_method_is_offered_once_its_helpers_are_fixed() {
     let describe = direct_describe();
     let methods = describe["result"]["methods"].as_object().unwrap();
     let mut fields: BTreeSet<&str> = methods.values().flat_map(executable_fields).collect();
@@ -175,7 +177,13 @@ fn every_method_is_offered_once_its_helpers_are_fixed() {
     let helpers: Vec<&str> = helpers.iter().map(String::as_str).collect();
     let tools = list_tools(&helpers);
     let names: BTreeSet<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, methods.keys().map(String::as_str).collect());
+    // Fixing every helper still never offers an input method.
+    let expected: BTreeSet<&str> = methods
+        .keys()
+        .map(String::as_str)
+        .filter(|name| *name != "action")
+        .collect();
+    assert_eq!(names, expected);
     for tool in &tools {
         let name = tool["name"].as_str().unwrap();
         let schema = &tool["inputSchema"];
@@ -268,16 +276,26 @@ fn describe_call_succeeds_through_cu_agent() {
 }
 
 #[test]
-fn action_is_still_unsupported_through_mcp() {
-    let replies = session(&[call(1, "action", json!({"event": {"kind": "click"}}))]);
-    assert_eq!(replies.len(), 1);
-    let result = &replies[0]["result"];
-    assert_eq!(result["isError"], true);
-    let s = &result["structuredContent"];
-    assert_eq!(s["status"], "unsupported");
-    assert_eq!(s["exit_code"], 3);
-    assert_eq!(s["needs_agent"], true);
-    assert_eq!(s["reply"]["action_allowed"], false);
+fn action_is_refused_through_mcp() {
+    let foreground = json!({"delivery": "foreground", "event": {"kind": "click"}});
+    let replies = session(&[
+        call(1, "action", json!({"event": {"kind": "click"}})),
+        call(2, "action", foreground),
+    ]);
+    assert_eq!(replies.len(), 2);
+    for reply in &replies {
+        let result = &reply["result"];
+        assert_eq!(result["isError"], true);
+        let s = &result["structuredContent"];
+        assert_eq!(s["status"], "refused");
+        assert!(s["exit_code"].is_null(), "cu-agent never ran");
+        assert!(s["reply"].is_null());
+        assert_eq!(s["action_allowed"], false);
+        assert!(s["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not exposed through MCP"));
+    }
 }
 
 #[test]

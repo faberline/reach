@@ -68,7 +68,7 @@ private func limited(_ value: String) -> (text: String, truncated: Bool) {
 
 // Use the same kernel source in discovery, identity and AX snapshots. AppKit's
 // launchDate is nil for some running apps, including Finder on this host.
-private func kernelStart(_ pid: pid_t) -> Double? {
+func kernelStart(_ pid: pid_t) -> Double? {
     guard pid > 0 else { return nil }
     var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
     var info = kinfo_proc()

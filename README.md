@@ -22,7 +22,7 @@ printf '%s\n' '{"id":"check","method":"describe"}' | target/debug/cu-agent
 ## 現況
 
 - 唯讀：視窗清單、無障礙樹、單張擷取、影格狀態、串流圖片、OCR，以及附帶程序身分與時間的證據。結果需要 Agent 覆核，不授權任何操作。
-- **輸入一律停用**：`action` 請求回報不支援，不送出任何事件。背景輸入、實體游標隔離、焦點隔離與圖片到視窗的座標都**未驗證**。匯入既有程式不代表這些已被驗證。
+- **輸入預設停用**：`action` 請求預設回報不支援，不送出任何事件。只有 ReachAgent 以 `--enable-input`（限核准的 App、有到期與事件數上限）啟動時，`cu-agent` 的前景 `action` 才會轉給它，且沒有 helper 退路；MCP 永遠不提供輸入。系統輸入後端尚未在真機執行過，見 [docs/AGENT-SERVICE.md](docs/AGENT-SERVICE.md) 的「輸入模式」。背景輸入、實體游標隔離、焦點隔離與圖片到視窗的座標都**未驗證**。匯入既有程式不代表這些已被驗證。
 - 離線虛擬輸入：`virtual_input::VirtualSession` 與 `cu-agent` 的 `simulate_input` 是離線的虛擬游標狀態機（虛擬位置、按住的按鍵、事件順序），不送真實事件，是背景輸入（issue #2）的起點，見 [docs/VIRTUAL-INPUT.md](docs/VIRTUAL-INPUT.md)。
 - 完整能力與限制清單見 [docs/CAPABILITIES.md](docs/CAPABILITIES.md)。
 

@@ -1,6 +1,6 @@
 # 前景輸入的離線模型（計畫 I-1）
 
-**這是離線模型，尚無真實投遞。** `action` 在 `cu-agent` 仍一律回報 `unsupported`，每個回應的 `action_allowed` 仍為 `false`；`cu-agent` 與 `cu-mcp` 沒有使用這個模型，`describe` 的輸出沒有變。輸入仍停用，本文件不改變 README、CAPABILITIES、AGENT-CLI、BACKGROUND-INPUT 的任何敘述。
+**這是離線模型，本身不投遞。** 每個回應的 `action_allowed` 仍為 `false`。I-2（issue #27）之後，`cu-agent` 只用這個模型檢查前景 `action` 請求的格式，再轉給 ReachAgent；閘門、重放防護與收據在 ReachAgent 內以 Swift 移植（`ReachAgentInput.swift`），順序、閘門名稱與原因字串都相同。`cu-mcp` 不使用這個模型，也不提供輸入。輸入預設停用，啟動方式見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「輸入模式」。
 
 模型的來源是已核准的計畫 `docs/plans/input-injection-plan.md`（第 3、4.3、4.4 節與 I-1）。程式在 `src/foreground_input.rs`，`input_guard` 加了前景變體 `review_foreground`。整個模型只有純 Rust 資料與 trait，不呼叫任何事件投遞 API、不用 FFI、不啟動程序。唯一的 `EventPoster` 實作是測試用的假後端。
 
@@ -46,4 +46,4 @@ G3、G7 至 G9 所需的事實由後端提供（`LiveFacts`，包含 `current_bu
 
 ## 尚未做的事
 
-ReachAgent 輸入後端、`--enable-input`、`describe` 的 `input` 區塊、MCP 不暴露輸入的過濾與測試，都屬於計畫的 I-2（issue #27）。實機驗證屬於 I-4 之後。
+I-2（issue #27）加入了 ReachAgent 輸入後端骨架、`--enable-input`、`describe` 的 `input` 區塊，以及 MCP 不暴露輸入的過濾，見 [AGENT-SERVICE.md](AGENT-SERVICE.md)。系統後端的即時取樣（焦點、HID 閒置、安全輸入、輸入法、遮擋）屬於 I-3，目前一律視為不安全。實機驗證屬於 I-4 之後。

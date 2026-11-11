@@ -16,6 +16,13 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const MAX_LINE: usize = 65_536;
 pub const MAX_REPLY: u64 = 8 * 1024 * 1024;
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// Methods that can send input. MCP never offers them in `tools/list` and refuses them in
+/// `tools/call` before any `cu-agent` process runs, whatever the ReachAgent arming state.
+/// Input is a local `cu-agent` request only (plan I-2, faberline/reach#27).
+pub const INPUT_METHODS: &[&str] = &["action"];
+/// The tool error for a refused input method.
+pub const INPUT_NOT_EXPOSED: &str =
+    "input methods are not exposed through MCP; MCP cannot send or enable input";
 
 pub struct AgentOutput {
     pub stdout: Vec<u8>,
@@ -100,6 +107,12 @@ impl<R: FnMut(&[u8]) -> Result<AgentOutput, String>> Server<R> {
                     Some(name) if !name.is_empty() => name,
                     _ => return Some(invalid_params(id)),
                 };
+                // Before any argument check: the refusal must not depend on the arguments.
+                if INPUT_METHODS.contains(&name) {
+                    let s =
+                        structured("refused", None, Value::Null, Some(INPUT_NOT_EXPOSED.into()));
+                    return Some(tool_result(id, s));
+                }
                 let mut request = match params.get("arguments") {
                     None => Map::new(),
                     Some(Value::Object(arguments)) => arguments.clone(),
@@ -320,6 +333,9 @@ pub fn tools_from_describe(
         .ok_or("describe reply has no methods object")?;
     let mut tools = Vec::new();
     for (name, entry) in methods {
+        if INPUT_METHODS.contains(&name.as_str()) {
+            continue;
+        }
         let all_fields = string_list(&entry["fields"])?;
         let agent_present = entry.get("agent_fields").is_some();
         let agent = match entry.get("agent_fields") {
@@ -598,11 +614,8 @@ mod tests {
         let tools = v["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         // `interpret_image` 與 `recognize_text` 的執行檔沒有在啟動時指定，所以不提供。
-        assert_eq!(
-            names,
-            ["action", "capture", "describe", "find_bundle", "windows"]
-        );
-        let capture = &tools[1];
+        assert_eq!(names, ["capture", "describe", "find_bundle", "windows"]);
+        let capture = &tools[0];
         assert_eq!(
             capture["inputSchema"]["required"],
             json!(["pid", "window_id", "image"])
@@ -611,7 +624,7 @@ mod tests {
             capture["inputSchema"]["properties"],
             json!({"pid": {}, "window_id": {}, "image": {}})
         );
-        let find_bundle = &tools[3];
+        let find_bundle = &tools[2];
         assert_eq!(find_bundle["inputSchema"]["required"], json!(["bundle_id"]));
         assert_eq!(
             find_bundle["inputSchema"]["properties"],
@@ -628,6 +641,82 @@ mod tests {
                 assert!(!is_executable_field(key), "{key}");
             }
         }
+    }
+
+    /// A describe reply whose `action` entry looks fully usable and whose agent is armed.
+    fn armed_describe() -> Value {
+        let mut m = methods();
+        m["action"] = json!({
+            "fields": ["delivery", "target", "observation", "event", "evidence_dir"],
+            "agent_fields": ["delivery", "target", "observation", "event", "evidence_dir"],
+            "availability": "foreground input through ReachAgent"
+        });
+        json!({"methods": m, "agent": {"state": "running",
+            "input": {"state": "armed", "events_remaining": 20}}})
+    }
+
+    #[test]
+    fn tools_list_never_offers_input_methods_whatever_the_arming() {
+        assert_eq!(INPUT_METHODS, ["action"]);
+        for (describe, helpers) in [
+            (json!({"methods": methods()}), Map::new()),
+            (armed_describe(), Map::new()),
+            (
+                armed_describe(),
+                helpers(&[("ax_helper", json!("/opt/reach/ax"))]),
+            ),
+        ] {
+            let tools = tools_from_describe(&json!({"result": describe}), &helpers).unwrap();
+            let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+            for input in INPUT_METHODS {
+                assert!(!names.contains(input), "{input} offered in {names:?}");
+            }
+            assert!(names.contains(&"describe"));
+        }
+    }
+
+    #[test]
+    fn tools_call_refuses_input_methods_before_running_cu_agent() {
+        let calls = Cell::new(0);
+        let mut server = Server::new(
+            |_: &[u8]| {
+                calls.set(calls.get() + 1);
+                reply_with("ok", 0, armed_describe())
+            },
+            Map::new(),
+        );
+        // Load the armed method table first, so the refusal cannot come from a missing table.
+        server
+            .handle_line(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        let foreground = json!({"delivery": "foreground",
+            "target": {"bundle_id": "com.apple.Safari", "pid": 1, "window_id": 1,
+                       "process_start_unix_seconds": 1.0},
+            "observation": {"image_sha256": "a".repeat(64)},
+            "event": {"kind": "click", "button": "left", "x": 1, "y": 1},
+            "evidence_dir": "/tmp/e"});
+        for arguments in [
+            foreground,
+            json!({"event": {"kind": "click"}}),
+            json!({}),
+            json!({"capture_helper": "/x"}),
+            json!({"id": "x"}),
+            json!("not an object"),
+        ] {
+            let v = server.handle_line(&call("action", arguments)).unwrap();
+            let s = &v["result"]["structuredContent"];
+            assert_eq!(v["result"]["isError"], true);
+            assert_eq!(s["status"], "refused");
+            assert_eq!(s["action_allowed"], false);
+            assert_eq!(s["reason"], INPUT_NOT_EXPOSED);
+            assert!(s["reply"].is_null());
+        }
+        assert_eq!(
+            calls.get(),
+            1,
+            "no cu-agent process ran for an input method"
+        );
     }
 
     #[test]

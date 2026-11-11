@@ -670,7 +670,225 @@ mod agent_route {
         let seen = server.join().unwrap();
         let names: Vec<&str> = seen.iter().map(|r| r["method"].as_str().unwrap()).collect();
         assert_eq!(names, ["describe", "permissions"]);
+        assert_eq!(v["result"]["agent"]["input"], json!({"state": "disabled"}));
+        assert_eq!(
+            v["result"]["methods"]["action"]["foreground"]["fields"],
+            json!(["delivery", "target", "observation", "event", "evidence_dir"])
+        );
         fs::remove_dir_all(d).unwrap();
+    }
+
+    // ---- Foreground `action` (plan I-2): ReachAgent only, no helper, no retry ----
+
+    fn foreground(id: &str) -> Value {
+        json!({"id": id, "method": "action", "delivery": "foreground",
+            "target": {"bundle_id": "org.local.rust-computer-use.target-event-fixture",
+                       "pid": 42, "window_id": 7, "process_start_unix_seconds": 1000.5},
+            "observation": {"image_sha256": PNG_SHA256},
+            "event": {"kind": "click", "button": "left", "x": 1, "y": 1},
+            "evidence_dir": "/tmp/reach-evidence-unused"})
+    }
+
+    fn outcome(status: &str, gate: Option<&str>, attempted: bool) -> Value {
+        json!({"status": status, "action_allowed": false, "gate": gate,
+            "reason": gate.map(|_| "why"), "attempted": attempted,
+            "release_attempted": attempted, "release_confirmed": attempted,
+            "attempt_file": null, "result_file": null})
+    }
+
+    /// A listener that must never be contacted.
+    fn untouched(socket: &Path) -> UnixListener {
+        let listener = UnixListener::bind(socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        listener
+    }
+
+    fn assert_untouched(listener: &UnixListener) {
+        let err = listener.accept().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn foreground_action_is_forwarded_once_to_reach_agent() {
+        let d = short_dir();
+        let socket = d.join("s.sock");
+        let server = serve(&socket, vec![ok(outcome("posted_unverified", None, true))]);
+        let (code, v) = with_socket(&socket, &foreground("f1"));
+        assert_eq!(code, 3, "posted_unverified is never success");
+        assert_eq!(v["status"], "posted_unverified");
+        assert_eq!(v["method"], "action");
+        assert_eq!(v["action_allowed"], false);
+        assert_eq!(v["result"]["action_allowed"], false);
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one call, no retry");
+        assert_eq!(seen[0]["method"], "action");
+        assert_eq!(seen[0]["id"], "f1");
+        let mut params = foreground("f1");
+        params.as_object_mut().unwrap().remove("id");
+        params.as_object_mut().unwrap().remove("method");
+        assert_eq!(seen[0]["params"], params);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn foreground_action_reports_each_agent_status() {
+        for (status, gate, attempted, code) in [
+            ("refused", Some("G8"), false, 1),
+            ("unsupported", Some("G1"), false, 3),
+            ("delivery_unknown", Some("G10"), true, 1),
+        ] {
+            let d = short_dir();
+            let socket = d.join("s.sock");
+            let server = serve(&socket, vec![ok(outcome(status, gate, attempted))]);
+            let (got, v) = with_socket(&socket, &foreground("f2"));
+            assert_eq!(got, code, "{status}");
+            assert_eq!(v["status"], status);
+            assert_eq!(v["result"]["gate"], gate.unwrap());
+            assert_eq!(server.join().unwrap().len(), 1);
+            fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn foreground_action_without_the_app_is_unavailable_and_has_no_fallback() {
+        let d = short_dir();
+        let socket = d.join("s.sock");
+        let (code, v) = with_socket(&socket, &foreground("f3"));
+        assert_eq!(code, 3);
+        assert_eq!(v["status"], "agent_unavailable");
+        assert_eq!(v["action_allowed"], false);
+        assert_eq!(v["result"]["fallback"], "none");
+        assert_eq!(v["result"]["attempted"], false);
+        assert!(!socket.exists(), "cu-agent must not create the socket");
+        // Helper fields are not a way around ReachAgent: they are schema errors.
+        let mut with_helper = foreground("f4");
+        with_helper["capture_helper"] = json!("/bin/true");
+        let (code, v) = with_socket(&socket, &with_helper);
+        assert_eq!(code, 1);
+        assert_eq!(v["status"], "refused");
+        assert_eq!(v["result"]["gate"], "schema");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn foreground_action_without_enable_input_is_input_disabled() {
+        let d = short_dir();
+        let socket = d.join("s.sock");
+        let unknown = json!({"version": 1, "id": null, "ok": false, "error": {
+            "code": "unknown_method", "message": "unknown method \"action\""}});
+        let server = serve(&socket, vec![unknown]);
+        let (code, v) = with_socket(&socket, &foreground("f5"));
+        assert_eq!(code, 3);
+        assert_eq!(v["status"], "unsupported");
+        assert_eq!(v["result"]["gate"], "G1");
+        assert_eq!(v["result"]["reason"], "input_disabled");
+        assert_eq!(v["result"]["attempted"], false);
+        assert_eq!(server.join().unwrap().len(), 1);
+        // Permission errors stay errors and name the permission.
+        let denied = json!({"version": 1, "id": null, "ok": false, "error": {
+            "code": "permission_denied", "message": "denied",
+            "permission": "post_event", "state": "denied"}});
+        let socket2 = d.join("t.sock");
+        let server = serve(&socket2, vec![denied]);
+        let (code, v) = with_socket(&socket2, &foreground("f6"));
+        assert_eq!(code, 1);
+        assert_eq!(v["status"], "error");
+        assert_eq!(v["result"]["agent_error"]["permission"], "post_event");
+        server.join().unwrap();
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn foreground_action_schema_errors_never_reach_the_socket() {
+        let d = short_dir();
+        let socket = d.join("s.sock");
+        let listener = untouched(&socket);
+        let mut cases = Vec::new();
+        for (path, bad) in [
+            ("/event/kind", json!("scroll")),
+            ("/event/button", json!("right")),
+            ("/target/pid", json!(0)),
+            ("/observation/image_sha256", json!("ABC")),
+            ("/evidence_dir", json!("relative")),
+            ("/extra", json!(true)),
+        ] {
+            let mut r = foreground("s1");
+            if path == "/extra" {
+                r["extra"] = bad;
+            } else {
+                *r.pointer_mut(path).unwrap() = bad;
+            }
+            cases.push(r);
+        }
+        let mut key = foreground("s4");
+        key["event"] = json!({"kind": "key", "keycode": 128});
+        cases.push(key);
+        let mut modifier = foreground("s5");
+        modifier["event"] = json!({"kind": "key", "keycode": 0, "modifiers": ["command"]});
+        cases.push(modifier);
+        let mut background = foreground("s2");
+        background["delivery"] = json!("background");
+        cases.push(background);
+        for r in cases {
+            let (code, v) = with_socket(&socket, &r);
+            assert_eq!(v["action_allowed"], false, "{r}");
+            assert_eq!(v["result"]["attempted"], false, "{r}");
+            if r["delivery"] == "background" {
+                assert_eq!((code, v["status"].as_str()), (3, Some("unsupported")));
+            } else {
+                assert_eq!((code, v["status"].as_str()), (1, Some("refused")), "{r}");
+                assert_eq!(v["result"]["gate"], "schema");
+            }
+        }
+        // The legacy `{event}` form keeps its old answer and never connects either.
+        let (code, v) = with_socket(
+            &socket,
+            &json!({"id":"s3","method":"action","event":{"kind":"click"}}),
+        );
+        assert_eq!(code, 3);
+        assert_eq!(v["status"], "unsupported");
+        assert_eq!(v["result"]["event_schema"], "unvalidated");
+        assert_untouched(&listener);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn foreground_action_with_a_bad_or_lost_reply_is_delivery_unknown() {
+        for reply in [
+            {
+                let mut o = outcome("posted_unverified", None, true);
+                o["action_allowed"] = json!(true);
+                Some(ok(o))
+            },
+            Some(ok(outcome("posted", None, true))),
+            Some(ok(outcome("posted_unverified", Some("G3"), true))),
+            Some(ok(json!({"status": "refused"}))),
+            None,
+        ] {
+            let d = short_dir();
+            let socket = d.join("s.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let thread = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                if let Some(mut reply) = reply {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    reply["id"] = request["id"].clone();
+                    stream.write_all(format!("{reply}\n").as_bytes()).unwrap();
+                }
+                // Dropping the stream without a reply is a lost reply.
+            });
+            let (code, v) = with_socket(&socket, &foreground("b1"));
+            thread.join().unwrap();
+            assert_eq!(code, 1);
+            assert_eq!(v["status"], "delivery_unknown");
+            assert_eq!(v["action_allowed"], false);
+            assert_eq!(v["result"]["gate"], "transport");
+            assert!(v["result"]["attempted"].is_null());
+            assert!(!v.to_string().contains("\"action_allowed\":true"));
+            fs::remove_dir_all(d).unwrap();
+        }
     }
 }
 
