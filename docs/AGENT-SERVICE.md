@@ -46,6 +46,10 @@ target/debug/ReachAgent --self-test
 | `capture_all_windows` | 同 `capture` | 同 `capture`，但在所有視窗（含不在螢幕上的）中比對；`window_scope` 為 `all_window_candidates` |
 | `accessibility` | `{"pid":<整數>,"windows_only":<布林，可省略>}` | 行程的 AX 視窗快照（見下） |
 | `accessibility_subtree` | `{"pid":<整數>,"source":"main"、"focused" 或 "windows","path":[<整數>,…]}` | 單一子樹的快照（見下） |
+| `input_source` | 無 | 目前的鍵盤輸入來源（唯讀，見下方「唯讀觀測」） |
+| `secure_input` | 無 | 安全輸入（Secure Event Input）是否開啟（唯讀） |
+| `pointer_location` | 無 | 指標位置（唯讀，不移動指標） |
+| `bundle_windows` | `{"bundle_id":"<bundle id>"}` | 該 bundle id 在螢幕上的視窗，含 layer 與 bounds（唯讀，不讀標題） |
 
 只有明確呼叫 `request_permissions` 才會向系統要求權限。預設 `post_event` 不能要求，含它的請求回 `not_requestable`；只有以輸入模式啟動（見下方「輸入模式」）時，`post_event` 才能被明確要求。
 
@@ -73,8 +77,8 @@ target/debug/ReachAgent --serve --socket <絕對路徑> [--test-mode] \
 - **系統後端**（`ReachAgentInputSystem.swift`）：唯一可以呼叫事件投遞 API 與 `CGRequestPostEventAccess` 的檔案。它被編譯進 App。啟動時 `SystemInputLaunch.authorize` 在有 `--enable-input`、沒有 `--test-mode`、行程環境變數 `CI` 為空時才回傳值；它自己讀 `ProcessInfo.processInfo.environment`，呼叫端不能傳入環境。`--enable-input` 不帶 `--test-mode` 而在 CI 下啟動時，服務以 `input_unavailable` 結束。
 - 這些檢查是什麼、不是什麼：
   - `--test-mode`、`CI` 檢查與靜態測試（`tests/foreground_input_static.rs`：投遞 API 只出現在這個檔案、沒有被禁止的事件種類、`SystemInputLaunch.authorize(` 與 `makeInputController(` 的呼叫點逐行列舉）都是**防誤用**的護欄，不是安全邊界。任何能在這台機器以 `--enable-input` 且不帶 `--test-mode` 啟動 ReachAgent、又沒有設定 `CI` 的人，都會拿到系統後端；修改原始碼的人也能改掉靜態測試。
-  - 目前真正讓系統後端送不出事件的，是即時事實的失敗即關閉：系統後端只唯讀取樣目標 App 的 bundle id 與是否為最前面的 App（G8，`NSWorkspace.frontmostApplication`）；焦點、HID 閒置、安全輸入、輸入法與遮擋尚未取樣（I-3），一律視為不安全，所以每個請求都會在 G7、G8 或 G9 被拒絕。
-  - I-3 加入取樣後這一點就不再成立：屆時條件都符合的請求會真的投遞事件，能擋住它的只剩啟用參數、允許清單、事件數與到期這些閘門，以及使用者給的 TCC 授權。
+  - 目前真正讓系統後端送不出事件的，是即時事實的失敗即關閉：系統後端只唯讀取樣目標 App 的 bundle id 與是否為最前面的 App（G8，`NSWorkspace.frontmostApplication`）；焦點、HID 閒置、安全輸入、輸入法與遮擋的即時事實都沒有接上，一律視為不安全，所以每個請求都會在 G7、G8 或 G9 被拒絕。
+  - I-3 只加入了唯讀觀測方法（見下方「唯讀觀測」），**沒有**把它們接進閘門的即時事實：G7 至 G9 仍然失敗即關閉。接上要等 I-4 在實機上以 fixture 驗證這些讀值之後；接上之後這一點就不再成立，屆時條件都符合的請求會真的投遞事件，能擋住它的只剩啟用參數、允許清單、事件數與到期這些閘門，以及使用者給的 TCC 授權。
 - `--self-test` 只驗證 `--test-mode` 或沒有 `--enable-input` 時 `authorize` 一定回 nil，以及參數解析把 `--enable-input` 不帶 `--test-mode` 解析成系統路徑；它從不以 `testMode: false` 建立輸入控制器。`CI` 檢查讀真實環境，所以只有靜態測試涵蓋。系統後端從未實際執行過；真機驗證需要簽章與 TCC 授權，屬於 I-4 之後。
 
 ### 擷取
@@ -98,6 +102,22 @@ target/debug/ReachAgent --serve --socket <絕對路徑> [--test-mode] \
 - Rust 端的 `check_accessibility_result` 與 `check_subtree_result` 核對結果與請求一致。
 - 真機無障礙讀取（`SystemAccessibilityBackend` 實際運作）尚未驗證：需要使用者建立憑證並授予輔助使用（issue #5、#6）。目前只有假後端的離線測試，也尚未驗證主執行緒阻塞在 accept 時 AX 讀取的行為。
 
+### 唯讀觀測（計畫 4.5，I-3，實機未驗證）
+
+`input_source`、`secure_input`、`pointer_location` 與 `bundle_windows` 只讀狀態（`ReachAgentObservation.swift`）。它們不需要任何權限、不檢查也不要求權限、不會彈出系統提示；不切換、不啟用、不列舉選擇輸入來源，不移動指標，不送任何事件，不讀視窗標題。
+
+- params：前三個方法不能有 params，或只能是空物件 `{}`；`bundle_windows` 只能有 `bundle_id`（1 到 255 位元組的 ASCII 字母、數字、`.` 與 `-`）。其他情形回 `invalid_params`，且先於任何讀取。
+- 每個 result 都有 `backend`（`fake` 或 `system`）、`scope`（固定 `read_only_unverified`）、`action_allowed`（固定 `false`）與 `used_by_input_gate`（固定 `false`）。
+- `input_source`：`input_source_id`、`input_mode_id`、`localized_name`、`source_type`（後三個可為 `null`），以及固定 `false` 的 `selection_changed`。系統後端呼叫 `TISCopyCurrentKeyboardInputSource` 並讀其屬性，只在主執行緒讀。
+- `secure_input`：`secure_event_input_enabled`（`IsSecureEventInputEnabled`）。
+- `pointer_location`：`x`、`y`（有限數）與 `coordinate_space`（`global_top_left_points`）。系統後端讀 `NSEvent.mouseLocation`，再以主螢幕高度翻成左上原點，與視窗 bounds 同一座標系。
+- `bundle_windows`：`bundle_id`、`owner_pids`（最多 8 個）、`windows`（最多 64 個，每個有 `window_id`、`owner_pid`、`layer`、`bounds`、`alpha`、`z_index`）、`truncated`、`window_scope`（`onscreen_only`）、`window_titles`（`not_read`）。系統後端讀 `CGWindowListCopyWindowInfo`（只取螢幕上的視窗、不含桌面元素），每次呼叫都以 `NSRunningApplication(processIdentifier:)` 比對擁有者的 bundle id；`z_index` 是在整份螢幕視窗清單中由前到後的位置。
+- 後端讀不到時回 `observation_failed`。
+- `--test-mode` 與 `--self-test` 只用假後端：固定的輸入來源、`secure_event_input_enabled: false`、指標 (100.5, 200.25)；fixture bundle id 有一個行程（pid 42）與 layer 0、layer 20 各一個視窗，`org.local.reach.fake-failure` 會失敗，其他 bundle id 沒有視窗。不呼叫任何系統 API。
+- **閘門不使用這些讀值**：系統輸入後端的即時事實仍失敗即關閉（G7 至 G9 一律拒絕）。接進閘門要等 I-4 實機驗證。
+- **實機未驗證**：系統後端的四個讀值都還沒在實機上與 fixture 對照驗證（座標翻轉在多螢幕下、輸入法 id 的值、安全輸入在其他 App 開啟時、視窗清單的 layer 與 z 順序）。結果只是觀察，不授權任何操作。
+- Rust 端的 `check_observation_result` 核對結果（含 `bundle_windows` 與請求的 bundle id 一致、上限與固定欄位）。
+
 ## 錯誤碼
 
 | code | 何時 |
@@ -106,12 +126,13 @@ target/debug/ReachAgent --serve --socket <絕對路徑> [--test-mode] \
 | `missing_field` | 缺 `id`、`version` 或 `method`，或型別不對 |
 | `version_mismatch` | `version` 不是 1 |
 | `unknown_method` | 不在上表的方法 |
-| `invalid_params` | `request_permissions` 的 `permissions` 缺少、為空、型別錯誤、名稱未知或重複；`capture`、`capture_all_windows`、`accessibility`、`accessibility_subtree` 的 params 缺少、多出、型別錯誤或超出範圍 |
+| `invalid_params` | `request_permissions` 的 `permissions` 缺少、為空、型別錯誤、名稱未知或重複；`capture`、`capture_all_windows`、`accessibility`、`accessibility_subtree`、`bundle_windows` 的 params 缺少、多出、型別錯誤或超出範圍；`input_source`、`secure_input`、`pointer_location` 帶了非空的 params |
 | `not_requestable` | 要求 `post_event` |
 | `peer_uid_mismatch` | 對端不是同一個使用者 |
 | `permission_denied` | `capture`、`capture_all_windows` 在 `screen_recording` 不是 `granted` 時回傳；`accessibility`、`accessibility_subtree` 在 `accessibility` 不是 `granted` 時回傳 |
 | `capture_failed` | 擷取失敗：視窗找不到或不唯一、幾何或是否在螢幕上在擷取期間改變、尺寸不支援、輸出檔已存在或無法建立、逾時 30 秒、系統低於 macOS 14 |
 | `ax_failed` | 無障礙讀取失敗：行程不存在或在讀取期間改變、AX 視窗讀不到或型別不對、子樹路徑無效；`message` 為 `<狀態碼>: <原因>` |
+| `observation_failed` | 唯讀觀測讀不到：沒有目前的輸入來源、不在主執行緒、主螢幕沒有 bounds、視窗清單無法取得 |
 
 缺少權限時不降級：方法回 `permission_denied`，並指出是哪一項權限與目前狀態。
 

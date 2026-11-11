@@ -152,6 +152,28 @@ fn tools_match_the_describe_of_the_real_cu_agent() {
     assert_eq!(names, expected);
     assert!(!names.contains(&"action") && names.contains(&"describe"));
     assert!(names.contains(&"capture") && !names.contains(&"recognize_text"));
+    // The read-only ReachAgent observations (I-3) are tools without any helper; they are not
+    // input methods and never change the `action` filtering.
+    for observation in [
+        "input_source",
+        "secure_input",
+        "pointer_location",
+        "bundle_windows",
+    ] {
+        assert!(names.contains(&observation), "{observation}");
+        assert!(
+            !mac_computer_use::mcp_server::INPUT_METHODS.contains(&observation),
+            "{observation}"
+        );
+    }
+    let bundle_windows = tools
+        .iter()
+        .find(|t| t["name"] == "bundle_windows")
+        .unwrap();
+    assert_eq!(
+        bundle_windows["inputSchema"]["required"],
+        json!(["bundle_id"])
+    );
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         let props: BTreeSet<String> = tool["inputSchema"]["properties"]

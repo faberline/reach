@@ -96,6 +96,21 @@ printf '%s\n' '{"id":"cap-1","method":"capture","pid":12345,"window_id":678,"ima
 - `describe` 的 `agent` 欄位回報 App 狀態：`running`（含 `app_version`、`protocol_version`、`test_mode` 與三種權限）、`unavailable` 或 `error`。它只呼叫 App 的 `describe` 與 `permissions`，不要求任何權限。
 - 真機行為尚未驗證：需要使用者建立憑證並授予權限（issue #5、#6）。目前只有假 socket 的離線測試。
 
+### 唯讀觀測（I-3，實機未驗證）
+
+`input_source`、`secure_input`、`pointer_location` 與 `bundle_windows` 只能經由 ReachAgent，沒有 helper 路徑。前三個方法除了 `id`、`method` 不接受其他欄位；`bundle_windows` 只有 `bundle_id`。
+
+```sh
+printf '%s\n' '{"id":"src-1","method":"input_source"}' | target/debug/cu-agent
+printf '%s\n' '{"id":"win-1","method":"bundle_windows","bundle_id":"com.apple.Safari"}' | target/debug/cu-agent
+```
+
+- 成功為 `ok`、狀態碼 0，`result` 是 App 的報告原樣（欄位見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「唯讀觀測」），`cu-agent` 用 `check_observation_result` 核對；`scope` 固定 `read_only_unverified`，`used_by_input_gate` 固定 `false`。
+- 它們不需要任何權限、不彈窗；不切換輸入來源、不移動指標、不讀視窗標題。帶 `select`、`x`、`y` 之類的欄位一律在連線前拒絕。
+- App 沒有執行時同樣是 `agent_unavailable`、`fallback: "none"`，不會直接讀系統狀態。
+- 前景輸入的閘門不使用這些讀值（G7 至 G9 仍失敗即關閉），接上要等 I-4 實機驗證。系統後端的讀值**實機未驗證**。
+- MCP（`cu-mcp`）會把它們列為工具；它們不是輸入方法，`action` 仍然不是 MCP 工具。
+
 呼叫者提供的 helper 路徑會被執行；只可使用受信任的執行檔。此 CLI 不驗證執行檔來源或雜湊，也不能防止它們被替換。它不證明目標沒有遮擋、座標已校準，或輸入不會影響游標與焦點。安全背景輸入未驗證前，不得將回覆轉成點擊或按鍵。
 
 AX 身分與快照 helper 的上限為 15 秒；擷取 helper 與遊戲 observer 的上限為 30 秒。輸出各限制 4 MiB。逾時時嘗試終止 helper 的程序群組，並回報錯誤。已離開群組的子程序可能繼續執行；若主程序先結束但後代仍持有輸出管道，逾時不保證清理後代。輸出管道採非阻塞讀取；超過期限會停止讀取。這不保證後代程序已結束。雜湊等其他子程序仍沒有此上限。呼叫端須檢查殘留程序和輸出檔，不得將逾時視為安全完成。

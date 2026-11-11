@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Longest accepted request line, in bytes, without the trailing newline.
 pub const MAX_LINE_BYTES: usize = 65536;
-pub const METHODS: [&str; 7] = [
+pub const METHODS: [&str; 11] = [
     "describe",
     "permissions",
     "request_permissions",
@@ -16,7 +16,24 @@ pub const METHODS: [&str; 7] = [
     "capture_all_windows",
     "accessibility",
     "accessibility_subtree",
+    "input_source",
+    "secure_input",
+    "pointer_location",
+    "bundle_windows",
 ];
+/// The read-only observation methods (plan 4.5, I-3). They need no permission, send no event
+/// and are not used by the input gate.
+pub const OBSERVATION_METHODS: [&str; 4] = [
+    "input_source",
+    "secure_input",
+    "pointer_location",
+    "bundle_windows",
+];
+/// Most distinct owner processes one `bundle_windows` report may list (the Swift
+/// `maxObservedProcesses`).
+pub const MAX_OBSERVED_PROCESSES: usize = 8;
+/// Most windows one `bundle_windows` report may list (the Swift `maxObservedWindows`).
+pub const MAX_OBSERVED_WINDOWS: usize = 64;
 /// Longest accepted `image` path of a capture request, in bytes.
 pub const MAX_IMAGE_PATH_BYTES: usize = 1024;
 /// Largest image side, in pixels, that a capture may report.
@@ -81,6 +98,10 @@ pub enum Method {
     CaptureAllWindows,
     Accessibility,
     AccessibilitySubtree,
+    InputSource,
+    SecureInput,
+    PointerLocation,
+    BundleWindows,
 }
 
 impl Method {
@@ -93,6 +114,10 @@ impl Method {
             "capture_all_windows" => Some(Method::CaptureAllWindows),
             "accessibility" => Some(Method::Accessibility),
             "accessibility_subtree" => Some(Method::AccessibilitySubtree),
+            "input_source" => Some(Method::InputSource),
+            "secure_input" => Some(Method::SecureInput),
+            "pointer_location" => Some(Method::PointerLocation),
+            "bundle_windows" => Some(Method::BundleWindows),
             _ => None,
         }
     }
@@ -590,6 +615,191 @@ fn check_ax_common(object: &serde_json::Map<String, Value>, pid: i32) -> Result<
     Ok(())
 }
 
+/// `input_source`, `secure_input` and `pointer_location` take no parameters: `params` is
+/// absent (`None`) or an empty object. The Swift `parseNoObservationParams` follows the same
+/// rules.
+pub fn parse_no_observation_params(params: Option<&Value>) -> Result<(), AgentError> {
+    let invalid = |message: &str| AgentError::new("invalid_params", message);
+    let Some(params) = params else {
+        return Ok(());
+    };
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid("params must be an object"))?;
+    match object.keys().min() {
+        Some(extra) => Err(invalid(&format!("unknown parameter `{extra}`"))),
+        None => Ok(()),
+    }
+}
+
+/// 1 to 255 bytes of ASCII letters, digits, dots and hyphens.
+pub fn valid_observed_bundle_id(value: &str) -> bool {
+    (1..=255).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
+/// Exactly `bundle_id`. The Swift `parseBundleWindowsParams` follows the same rules.
+pub fn parse_bundle_windows_params(params: &Value) -> Result<String, AgentError> {
+    let invalid = |message: &str| AgentError::new("invalid_params", message);
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid("params must be an object"))?;
+    if let Some(extra) = object.keys().filter(|k| *k != "bundle_id").min() {
+        return Err(invalid(&format!("unknown parameter `{extra}`")));
+    }
+    match object.get("bundle_id").and_then(Value::as_str) {
+        Some(id) if valid_observed_bundle_id(id) => Ok(id.to_string()),
+        _ => Err(invalid(
+            "`bundle_id` must be 1 to 255 bytes of ASCII letters, digits, dots and hyphens",
+        )),
+    }
+}
+
+fn finite_number(object: &serde_json::Map<String, Value>, field: &str) -> Result<f64, String> {
+    object
+        .get(field)
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| format!("{field}: must be a finite number"))
+}
+
+fn nullable_text(object: &serde_json::Map<String, Value>, field: &str) -> Result<(), String> {
+    match object.get(field) {
+        Some(Value::Null | Value::String(_)) => Ok(()),
+        _ => Err(format!("{field}: must be a string or null")),
+    }
+}
+
+/// Check the result of a read-only observation. `bundle_id` is the request's for
+/// `bundle_windows` and ignored otherwise. Every observation names its backend, says it is
+/// read-only and unverified, and is never used by the input gate.
+pub fn check_observation_result(
+    method: Method,
+    bundle_id: Option<&str>,
+    result: &Value,
+) -> Result<(), String> {
+    let object = result
+        .as_object()
+        .ok_or_else(|| "result: not an object".to_string())?;
+    if !matches!(
+        object.get("backend").and_then(Value::as_str),
+        Some("fake" | "system")
+    ) {
+        return Err("backend: must be fake or system".to_string());
+    }
+    if object.get("scope").and_then(Value::as_str) != Some("read_only_unverified") {
+        return Err("scope: must be read_only_unverified".to_string());
+    }
+    if object.get("action_allowed") != Some(&Value::Bool(false)) {
+        return Err("action_allowed: must be false".to_string());
+    }
+    if object.get("used_by_input_gate") != Some(&Value::Bool(false)) {
+        return Err("used_by_input_gate: must be false".to_string());
+    }
+    match method {
+        Method::InputSource => {
+            match object.get("input_source_id").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => {}
+                _ => return Err("input_source_id: must be a non-empty string".to_string()),
+            }
+            for field in ["input_mode_id", "localized_name", "source_type"] {
+                nullable_text(object, field)?;
+            }
+            if object.get("selection_changed") != Some(&Value::Bool(false)) {
+                return Err("selection_changed: must be false".to_string());
+            }
+        }
+        Method::SecureInput => {
+            if !object
+                .get("secure_event_input_enabled")
+                .is_some_and(Value::is_boolean)
+            {
+                return Err("secure_event_input_enabled: must be a boolean".to_string());
+            }
+        }
+        Method::PointerLocation => {
+            finite_number(object, "x")?;
+            finite_number(object, "y")?;
+            if object.get("coordinate_space").and_then(Value::as_str)
+                != Some("global_top_left_points")
+            {
+                return Err("coordinate_space: must be global_top_left_points".to_string());
+            }
+        }
+        Method::BundleWindows => check_bundle_windows(object, bundle_id)?,
+        _ => return Err("method: not an observation method".to_string()),
+    }
+    Ok(())
+}
+
+fn check_bundle_windows(
+    object: &serde_json::Map<String, Value>,
+    bundle_id: Option<&str>,
+) -> Result<(), String> {
+    if bundle_id.is_none() || object.get("bundle_id").and_then(Value::as_str) != bundle_id {
+        return Err("bundle_id: differs from the request".to_string());
+    }
+    if object.get("window_scope").and_then(Value::as_str) != Some("onscreen_only") {
+        return Err("window_scope: must be onscreen_only".to_string());
+    }
+    if object.get("window_titles").and_then(Value::as_str) != Some("not_read") {
+        return Err("window_titles: must be not_read".to_string());
+    }
+    if !object.get("truncated").is_some_and(Value::is_boolean) {
+        return Err("truncated: must be a boolean".to_string());
+    }
+    let owners: Vec<i64> = match object.get("owner_pids").and_then(Value::as_array) {
+        Some(list) if list.len() <= MAX_OBSERVED_PROCESSES => list
+            .iter()
+            .map(|v| v.as_i64().filter(|n| (1..=i64::from(i32::MAX)).contains(n)))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "owner_pids: must be positive 32-bit integers".to_string())?,
+        _ => {
+            return Err(format!(
+                "owner_pids: must be an array of at most {MAX_OBSERVED_PROCESSES} items"
+            ))
+        }
+    };
+    let windows = match object.get("windows").and_then(Value::as_array) {
+        Some(list) if list.len() <= MAX_OBSERVED_WINDOWS => list,
+        _ => {
+            return Err(format!(
+                "windows: must be an array of at most {MAX_OBSERVED_WINDOWS} items"
+            ))
+        }
+    };
+    for window in windows {
+        let window = window
+            .as_object()
+            .ok_or_else(|| "windows: every item must be an object".to_string())?;
+        match window.get("window_id").and_then(Value::as_u64) {
+            Some(n) if (1..=u64::from(u32::MAX)).contains(&n) => {}
+            _ => return Err("windows.window_id: must be a positive 32-bit integer".to_string()),
+        }
+        match window.get("owner_pid").and_then(Value::as_i64) {
+            Some(pid) if owners.contains(&pid) => {}
+            _ => return Err("windows.owner_pid: must be one of owner_pids".to_string()),
+        }
+        if window.get("layer").and_then(Value::as_i64).is_none() {
+            return Err("windows.layer: must be an integer".to_string());
+        }
+        if window.get("z_index").and_then(Value::as_u64).is_none() {
+            return Err("windows.z_index: must be a non-negative integer".to_string());
+        }
+        finite_number(window, "alpha").map_err(|e| format!("windows.{e}"))?;
+        let bounds = window
+            .get("bounds")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "windows.bounds: must be an object".to_string())?;
+        for field in ["x", "y", "width", "height"] {
+            finite_number(bounds, field).map_err(|e| format!("windows.bounds.{e}"))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn describe_result(app_version: &str, test_mode: bool) -> Value {
     json!({
         "app": "ReachAgent",
@@ -1002,7 +1212,7 @@ mod tests {
             include_str!("../build-agent-app.sh"),
         ] {
             assert!(script.contains(
-                "ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift ReachAgentInput.swift ReachAgentInputSystem.swift"
+                "ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift ReachAgentInput.swift ReachAgentInputSystem.swift ReachAgentObservation.swift"
             ));
         }
     }
@@ -1014,12 +1224,245 @@ mod tests {
             Method::parse("accessibility_subtree"),
             Some(Method::AccessibilitySubtree)
         );
-        assert_eq!(METHODS.len(), 7);
+        assert_eq!(METHODS.len(), 11);
         let d = describe_result("0.1.0", true);
         assert_eq!(d["methods"], json!(METHODS));
         let listed = d["methods"].as_array().expect("array");
         assert!(listed.contains(&json!("accessibility")));
         assert!(listed.contains(&json!("accessibility_subtree")));
+    }
+
+    #[test]
+    fn observation_methods_are_registered() {
+        for (name, method) in [
+            ("input_source", Method::InputSource),
+            ("secure_input", Method::SecureInput),
+            ("pointer_location", Method::PointerLocation),
+            ("bundle_windows", Method::BundleWindows),
+        ] {
+            assert_eq!(Method::parse(name), Some(method));
+            assert!(OBSERVATION_METHODS.contains(&name));
+            assert!(METHODS.contains(&name));
+        }
+        assert!(!OBSERVATION_METHODS.contains(&"action"));
+        assert!(!METHODS.contains(&"action"));
+    }
+
+    #[test]
+    fn observation_params_rules() {
+        assert_eq!(parse_no_observation_params(None), Ok(()));
+        assert_eq!(parse_no_observation_params(Some(&json!({}))), Ok(()));
+        for bad in [json!({"select": "x"}), json!([]), json!(null), json!("x")] {
+            let err = parse_no_observation_params(Some(&bad)).expect_err("rejected");
+            assert_eq!(err.code, "invalid_params", "{bad}");
+        }
+        assert_eq!(
+            parse_bundle_windows_params(&json!({"bundle_id": "com.apple.Safari"})),
+            Ok("com.apple.Safari".to_string())
+        );
+        let longest = "a".repeat(255);
+        assert!(parse_bundle_windows_params(&json!({ "bundle_id": longest })).is_ok());
+        for bad in [
+            json!({}),
+            json!({"bundle_id": ""}),
+            json!({"bundle_id": "a".repeat(256)}),
+            json!({"bundle_id": "bad id"}),
+            json!({"bundle_id": "a/b"}),
+            json!({"bundle_id": "注音"}),
+            json!({"bundle_id": 1}),
+            json!({"bundle_id": "a.b", "pid": 1}),
+            json!([]),
+        ] {
+            let err = parse_bundle_windows_params(&bad).expect_err("rejected");
+            assert_eq!(err.code, "invalid_params", "{bad}");
+        }
+    }
+
+    fn observation_common() -> Value {
+        json!({"backend": "fake", "scope": "read_only_unverified", "action_allowed": false,
+               "used_by_input_gate": false})
+    }
+
+    fn with_common(fields: Value) -> Value {
+        let mut value = observation_common();
+        value
+            .as_object_mut()
+            .expect("object")
+            .extend(fields.as_object().expect("object").clone());
+        value
+    }
+
+    #[test]
+    fn check_observation_result_accepts_the_reports_and_rejects_mismatches() {
+        let source = with_common(
+            json!({"input_source_id": "org.local.reach.fake-input-source",
+            "input_mode_id": null, "localized_name": "Fake", "source_type": null,
+            "selection_changed": false}),
+        );
+        let secure = with_common(json!({"secure_event_input_enabled": false}));
+        let pointer = with_common(
+            json!({"x": 100.5, "y": 200.25, "coordinate_space": "global_top_left_points"}),
+        );
+        let windows = with_common(json!({"bundle_id": "a.b", "owner_pids": [42],
+            "windows": [{"window_id": 8, "owner_pid": 42, "layer": 20, "alpha": 1.0, "z_index": 1,
+                         "bounds": {"x": 120.0, "y": 300.0, "width": 240.0, "height": 40.0}}],
+            "truncated": false, "window_scope": "onscreen_only", "window_titles": "not_read"}));
+        let cases = [
+            (Method::InputSource, &source),
+            (Method::SecureInput, &secure),
+            (Method::PointerLocation, &pointer),
+            (Method::BundleWindows, &windows),
+        ];
+        for (method, report) in cases {
+            assert_eq!(
+                check_observation_result(method, Some("a.b"), report),
+                Ok(())
+            );
+            for (field, value) in [
+                ("backend", json!("other")),
+                ("scope", json!("verified")),
+                ("action_allowed", json!(true)),
+                ("used_by_input_gate", json!(true)),
+            ] {
+                let mut broken = report.clone();
+                broken[field] = value;
+                let err = check_observation_result(method, Some("a.b"), &broken).expect_err(field);
+                assert!(err.contains(field), "{method:?} {field}: {err}");
+            }
+        }
+        let mut system = source.clone();
+        system["backend"] = json!("system");
+        assert_eq!(
+            check_observation_result(Method::InputSource, None, &system),
+            Ok(())
+        );
+        for (method, report, field, value) in [
+            (Method::InputSource, &source, "input_source_id", json!("")),
+            (Method::InputSource, &source, "input_mode_id", json!(1)),
+            (
+                Method::InputSource,
+                &source,
+                "selection_changed",
+                json!(true),
+            ),
+            (
+                Method::SecureInput,
+                &secure,
+                "secure_event_input_enabled",
+                json!("no"),
+            ),
+            (Method::PointerLocation, &pointer, "x", json!("1")),
+            (
+                Method::PointerLocation,
+                &pointer,
+                "coordinate_space",
+                json!("cocoa"),
+            ),
+            (Method::BundleWindows, &windows, "bundle_id", json!("c.d")),
+            (
+                Method::BundleWindows,
+                &windows,
+                "window_titles",
+                json!("read"),
+            ),
+            (
+                Method::BundleWindows,
+                &windows,
+                "window_scope",
+                json!("all"),
+            ),
+            (Method::BundleWindows, &windows, "owner_pids", json!([0])),
+            (
+                Method::BundleWindows,
+                &windows,
+                "owner_pids",
+                json!(vec![1; 9]),
+            ),
+            (Method::BundleWindows, &windows, "truncated", json!(null)),
+        ] {
+            let mut broken = report.clone();
+            broken[field] = value;
+            let err = check_observation_result(method, Some("a.b"), &broken).expect_err(field);
+            assert!(err.contains(field), "{method:?} {field}: {err}");
+        }
+        let mut too_many = windows.clone();
+        too_many["windows"] = json!(vec![windows["windows"][0].clone(); 65]);
+        let err = check_observation_result(Method::BundleWindows, Some("a.b"), &too_many)
+            .expect_err("65 windows");
+        assert!(err.contains("windows"), "{err}");
+        for (field, value) in [
+            ("owner_pid", json!(43)),
+            ("window_id", json!(0)),
+            ("layer", json!("20")),
+            ("z_index", json!(-1)),
+            ("alpha", json!(null)),
+            ("bounds", json!({"x": 0.0, "y": 0.0, "width": 1.0})),
+        ] {
+            let mut broken = windows.clone();
+            broken["windows"][0][field] = value;
+            let err = check_observation_result(Method::BundleWindows, Some("a.b"), &broken)
+                .expect_err(field);
+            assert!(err.contains(field), "{field}: {err}");
+        }
+        assert!(check_observation_result(Method::BundleWindows, None, &windows).is_err());
+        assert!(check_observation_result(Method::Capture, None, &secure).is_err());
+        assert!(check_observation_result(Method::SecureInput, None, &json!([])).is_err());
+    }
+
+    /// The observation file reads state only: it never selects an input source, never moves
+    /// the pointer, never posts an event, never asks for a permission and never reads a title.
+    #[test]
+    fn observation_source_is_read_only_and_never_prompts() {
+        let source = include_str!("../ReachAgentObservation.swift");
+        for needed in [
+            "TISCopyCurrentKeyboardInputSource",
+            "IsSecureEventInputEnabled",
+            "NSEvent.mouseLocation",
+            "CGWindowListCopyWindowInfo",
+            "FakeObservationBackend",
+            "\"observation_failed\"",
+            "\"used_by_input_gate\"] = false",
+            &format!("let maxObservedProcesses = {MAX_OBSERVED_PROCESSES}"),
+            &format!("let maxObservedWindows = {MAX_OBSERVED_WINDOWS}"),
+        ] {
+            assert!(
+                source.contains(needed),
+                "ReachAgentObservation.swift must contain {needed}"
+            );
+        }
+        for forbidden in [
+            "TISSelectInputSource",
+            "TISDeselectInputSource",
+            "TISEnableInputSource",
+            "TISDisableInputSource",
+            "TISCreateInputSourceList",
+            "TISSetInputMethodKeyboardLayoutOverride",
+            "TISRegisterInputSource",
+            "EnableSecureEventInput",
+            "DisableSecureEventInput",
+            "CGEvent",
+            "CGWarpMouseCursorPosition",
+            "CGDisplayMoveCursorToPoint",
+            "CGAssociateMouseAndMouseCursorPosition",
+            "AXIsProcessTrusted",
+            "AXUIElement",
+            "CGRequest",
+            "CGPreflight",
+            "kCGWindowName",
+            "CGWindowListCreateImage",
+            "SCScreenshotManager",
+            "NSWorkspace",
+            ".activate(",
+            "NSAppleScript",
+            "Process(",
+            "@main",
+            "exit(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "ReachAgentObservation.swift must not contain {forbidden}"
+            );
+        }
     }
 
     #[test]

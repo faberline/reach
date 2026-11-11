@@ -505,6 +505,52 @@ mod agent_route {
     }
 
     #[test]
+    fn agent_route_forwards_the_read_only_observations() {
+        let report = json!({"bundle_id": "a.b", "owner_pids": [42],
+            "windows": [{"window_id": 7, "owner_pid": 42, "layer": 0, "alpha": 1.0,
+                         "z_index": 0,
+                         "bounds": {"x": 0.0, "y": 25.0, "width": 800.0, "height": 600.0}}],
+            "truncated": false, "window_scope": "onscreen_only", "window_titles": "not_read",
+            "backend": "fake", "scope": "read_only_unverified", "action_allowed": false,
+            "used_by_input_gate": false});
+        let d = short_dir();
+        let socket = d.join("s.sock");
+        let server = serve(&socket, vec![ok(report.clone())]);
+        let request = json!({"id":"w1","method":"bundle_windows","bundle_id":"a.b"});
+        let (code, v) = with_socket(&socket, &request);
+        assert_eq!(code, 0);
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["action_allowed"], false);
+        assert_eq!(v["result"], report);
+        let seen = server.join().unwrap();
+        assert_eq!(seen[0]["method"], "bundle_windows");
+        assert_eq!(seen[0]["params"], json!({"bundle_id": "a.b"}));
+
+        // Without the App there is no fallback, and nothing is read directly.
+        for request in [
+            json!({"id":"o1","method":"input_source"}),
+            json!({"id":"o2","method":"secure_input"}),
+            json!({"id":"o3","method":"pointer_location"}),
+            json!({"id":"o4","method":"bundle_windows","bundle_id":"a.b"}),
+        ] {
+            let (code, v) = with_socket(&socket, &request);
+            assert_eq!(code, 3, "{request}");
+            assert_eq!(v["status"], "agent_unavailable", "{request}");
+            assert_eq!(v["result"]["fallback"], "none");
+        }
+        // Selecting a source or moving the pointer is not a parameter.
+        for request in [
+            json!({"id":"x1","method":"input_source","select":"com.apple.keylayout.ABC"}),
+            json!({"id":"x2","method":"pointer_location","x":1,"y":1}),
+        ] {
+            let (code, v) = with_socket(&socket, &request);
+            assert_eq!(code, 1, "{request}");
+            assert_eq!(v["status"], "error", "{request}");
+        }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
     fn agent_route_capture_adds_the_image_hash() {
         let d = short_dir();
         let socket = d.join("s.sock");
@@ -654,6 +700,24 @@ mod agent_route {
         for ((method, fields), (_, agent_fields)) in legacy.iter().zip(agent.iter()) {
             assert_eq!(&methods[*method]["fields"], fields, "{method}");
             assert_eq!(&methods[*method]["agent_fields"], agent_fields, "{method}");
+        }
+        for (method, fields) in [
+            ("input_source", json!([])),
+            ("secure_input", json!([])),
+            ("pointer_location", json!([])),
+            ("bundle_windows", json!(["bundle_id"])),
+        ] {
+            assert_eq!(methods[method]["fields"], fields, "{method}");
+            assert_eq!(methods[method]["agent_fields"], fields, "{method}");
+            let availability = methods[method]["availability"].as_str().unwrap();
+            assert!(
+                availability.contains("unverified on a real machine"),
+                "{method}"
+            );
+            assert!(
+                availability.contains("not used by the input gate"),
+                "{method}"
+            );
         }
         let describe = ok(json!({"app": "ReachAgent", "app_version": "0.1.0",
             "protocol_version": 1, "methods": [], "test_mode": true}));

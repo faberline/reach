@@ -130,7 +130,11 @@ fn docs_state_how_input_mode_starts_and_that_it_is_off_by_default() {
         "從未實際執行過",
         "不是安全邊界",
         "防誤用",
-        "加入取樣後",
+        // I-3 adds read-only observations but does not wire them into the gate (I-4).
+        "接上之後這一點就不再成立",
+        "**沒有**把它們接進閘門",
+        "實機未驗證",
+        "`used_by_input_gate`",
         "18、23、36、38、44、49",
     ] {
         assert!(
