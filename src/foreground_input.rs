@@ -44,9 +44,19 @@ pub const TITLE_BAR_BAND_POINTS: f64 = 52.0;
 pub const HELD_MODIFIER_FLAGS_MASK: u64 =
     0x0001_0000 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000 | 0x0080_0000;
 
-/// G9 decision for a sampled flag word: true when no modifier in the mask is down.
+/// Caps Lock flag bit. It stays set for as long as the lock is on, not only while the key is
+/// down, so it has its own reason `caps_lock_on` instead of `modifier_held` (plan review P31-3).
+pub const CAPS_LOCK_FLAG: u64 = 0x0001_0000;
+
+/// G9 decision for a sampled flag word: true when no modifier in the mask other than Caps Lock
+/// is down. Caps Lock is judged by `caps_lock_off`.
 pub fn modifiers_released(flags: u64) -> bool {
-    flags & HELD_MODIFIER_FLAGS_MASK == 0
+    flags & HELD_MODIFIER_FLAGS_MASK & !CAPS_LOCK_FLAG == 0
+}
+
+/// G9 decision for a sampled flag word: true when Caps Lock is not on.
+pub fn caps_lock_off(flags: u64) -> bool {
+    flags & CAPS_LOCK_FLAG == 0
 }
 
 /// G9 decision for sampled mouse buttons: true when none is down.
@@ -387,8 +397,10 @@ pub struct LiveFacts {
     pub target_frontmost: bool,
     pub focus_unchanged: bool,
     pub hid_idle: bool,
-    /// No modifier in `HELD_MODIFIER_FLAGS_MASK` is down (G9, plan review R2).
+    /// No modifier in `HELD_MODIFIER_FLAGS_MASK` other than Caps Lock is down (G9, plan review R2).
     pub modifiers_released: bool,
+    /// Caps Lock is not on (G9, plan review P31-3).
+    pub caps_lock_off: bool,
     /// No mouse button is down (G9, plan review R2).
     pub mouse_buttons_released: bool,
     pub secure_input_off: bool,
@@ -568,6 +580,9 @@ impl InputGate {
         }
         if !l.modifiers_released {
             return Err(("G9", "modifier_held"));
+        }
+        if !l.caps_lock_off {
+            return Err(("G9", "caps_lock_on"));
         }
         if !l.mouse_buttons_released {
             return Err(("G9", "mouse_button_down"));

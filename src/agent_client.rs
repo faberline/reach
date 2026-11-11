@@ -909,7 +909,7 @@ mod tests {
             (
                 json!({"id": "o4", "method": "bundle_windows", "bundle_id": "a.b"}),
                 merged(json!({"bundle_id": "a.b", "owner_pids": [], "windows": [],
-                    "truncated": false, "window_scope": "onscreen_only",
+                    "truncated": false, "skipped": 0, "window_scope": "onscreen_only",
                     "window_titles": "not_read"})),
                 json!({"bundle_id": "a.b"}),
             ),

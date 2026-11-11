@@ -35,8 +35,15 @@ let titleBarBandPoints = 52.0
 /// Command 0x100000, Fn 0x800000. `HELD_MODIFIER_FLAGS_MASK` in src/foreground_input.rs is the same.
 let heldModifierFlagsMask: UInt64 = 0x0001_0000 | 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000 | 0x0080_0000
 
-/// G9 decision for a sampled flag word: true when no modifier above is down.
-func modifiersReleased(flags: UInt64) -> Bool { flags & heldModifierFlagsMask == 0 }
+/// Caps Lock flag bit. It stays set while the lock is on, not only while the key is down, so it
+/// has its own reason `caps_lock_on` instead of `modifier_held` (plan review P31-3).
+let capsLockFlag: UInt64 = 0x0001_0000
+
+/// G9 decision for a sampled flag word: true when no modifier above, Caps Lock aside, is down.
+func modifiersReleased(flags: UInt64) -> Bool { flags & heldModifierFlagsMask & ~capsLockFlag == 0 }
+
+/// G9 decision for a sampled flag word: true when Caps Lock is not on.
+func capsLockOff(flags: UInt64) -> Bool { flags & capsLockFlag == 0 }
 
 /// G9 decision for sampled mouse buttons: true when none is down.
 func mouseButtonsReleased(_ down: [Bool]) -> Bool { !down.contains(true) }
@@ -337,8 +344,10 @@ struct InputLiveFacts: Equatable {
     var targetFrontmost: Bool
     var focusUnchanged: Bool
     var hidIdle: Bool
-    /// No modifier in `heldModifierFlagsMask` is down (G9, plan review R2).
+    /// No modifier in `heldModifierFlagsMask` other than Caps Lock is down (G9, plan review R2).
     var modifiersReleased: Bool
+    /// Caps Lock is not on (G9, plan review P31-3).
+    var capsLockOff: Bool
     /// No mouse button is down (G9, plan review R2).
     var mouseButtonsReleased: Bool
     var secureInputOff: Bool
@@ -347,7 +356,7 @@ struct InputLiveFacts: Equatable {
 
     static let failClosed = InputLiveFacts(
         currentBundleId: nil, targetFrontmost: false, focusUnchanged: false, hidIdle: false,
-        modifiersReleased: false, mouseButtonsReleased: false,
+        modifiersReleased: false, capsLockOff: false, mouseButtonsReleased: false,
         secureInputOff: false, inputSourceOk: false, pointUnoccluded: false)
 }
 
@@ -502,6 +511,7 @@ final class InputGate {
         if !live.focusUnchanged { return ("G8", "focus_changed") }
         if !live.hidIdle { return ("G9", "hid_not_idle") }
         if !live.modifiersReleased { return ("G9", "modifier_held") }
+        if !live.capsLockOff { return ("G9", "caps_lock_on") }
         if !live.mouseButtonsReleased { return ("G9", "mouse_button_down") }
         if !live.secureInputOff { return ("G9", "secure_input_enabled") }
         if !live.inputSourceOk { return ("G9", "input_source_unexpected") }
@@ -742,7 +752,7 @@ final class FakeInputBackend: InputSampler, EventPoster, @unchecked Sendable {
     var bundles: [Int32: String] = [:]
     var facts = InputLiveFacts(
         currentBundleId: nil, targetFrontmost: true, focusUnchanged: true, hidIdle: true,
-        modifiersReleased: true, mouseButtonsReleased: true,
+        modifiersReleased: true, capsLockOff: true, mouseButtonsReleased: true,
         secureInputOff: true, inputSourceOk: true, pointUnoccluded: true)
     var verifyResult = true
     /// Failures to return, by call name ("down", "up", "move", "key_down", "key_up").
@@ -1043,6 +1053,11 @@ func inputSelfCheck() -> [String] {
     check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: facts)) == "refused/G9/modifier_held",
         "a held modifier refuses a key_tap too")
     facts = fake.facts
+    facts.capsLockOff = false
+    check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/caps_lock_on", "Caps Lock on is refused")
+    check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: facts)) == "refused/G9/caps_lock_on",
+        "Caps Lock on refuses a key_tap too")
+    facts = fake.facts
     facts.mouseButtonsReleased = false
     check(reason(run(fresh, request("a", click), facts: facts)) == "refused/G9/mouse_button_down", "a pressed mouse button is refused")
     check(reason(run(fresh, request("a", .keyTap(keycode: 18)), facts: facts)) == "refused/G9/mouse_button_down",
@@ -1057,12 +1072,16 @@ func inputSelfCheck() -> [String] {
         == "posted_unverified/-/-", "occlusion does not apply to key_tap")
     check(fake.events.count == before + 2, "no refusal sent an event")
     check(InputLiveFacts.failClosed.targetFrontmost == false && InputLiveFacts.failClosed.hidIdle == false
-        && InputLiveFacts.failClosed.modifiersReleased == false && InputLiveFacts.failClosed.mouseButtonsReleased == false,
+        && InputLiveFacts.failClosed.modifiersReleased == false && InputLiveFacts.failClosed.capsLockOff == false && InputLiveFacts.failClosed.mouseButtonsReleased == false,
         "unknown facts fail closed")
 
     // R2 decisions on sampled values (the system sampler feeds these; it is not wired in yet).
     check(modifiersReleased(flags: 0), "no flag means no modifier")
-    for (bit, name) in [(0x0001_0000, "Caps Lock"), (0x0002_0000, "Shift"), (0x0004_0000, "Control"),
+    check(capsLockOff(flags: 0) && !capsLockOff(flags: capsLockFlag) && !capsLockOff(flags: capsLockFlag | 0x0002_0000),
+        "Caps Lock on is its own reason")
+    check(modifiersReleased(flags: capsLockFlag) && !modifiersReleased(flags: capsLockFlag | 0x0002_0000),
+        "Caps Lock alone is not a held modifier")
+    for (bit, name) in [(0x0002_0000, "Shift"), (0x0004_0000, "Control"),
                         (0x0008_0000, "Option"), (0x0010_0000, "Command"), (0x0080_0000, "Fn")] as [(UInt64, String)] {
         check(!modifiersReleased(flags: bit), "\(name) counts as held")
         check(!modifiersReleased(flags: bit | 0x0020_0000), "\(name) with the numeric-pad bit counts as held")

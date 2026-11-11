@@ -28,7 +28,8 @@ struct ObservedWindow {
     let ownerPid: Int32
     let layer: Int
     let x: Double, y: Double, width: Double, height: Double
-    let alpha: Double
+    /// Absent from the window list entry: reported as `null`, never invented.
+    let alpha: Double?
     /// Position in the whole on-screen window list, front (0) to back.
     let zIndex: Int
 
@@ -36,7 +37,7 @@ struct ObservedWindow {
         [
             "window_id": Int(windowId), "owner_pid": Int(ownerPid), "layer": layer,
             "bounds": ["x": x, "y": y, "width": width, "height": height],
-            "alpha": alpha, "z_index": zIndex,
+            "alpha": alpha.map { $0 as Any } ?? NSNull(), "z_index": zIndex,
         ]
     }
 }
@@ -55,7 +56,7 @@ protocol ObservationBackend: Sendable {
     func secureEventInputEnabled() throws -> Bool
     /// Global display coordinates in points, origin at the top left of the main display.
     func pointerLocation() throws -> (x: Double, y: Double)
-    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool)
+    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool, skipped: Int)
 }
 
 // MARK: - Request handling
@@ -128,6 +129,7 @@ func handleObservation(_ id: String, method: String, _ object: [String: Any], ba
             result = [
                 "bundle_id": bundleId, "owner_pids": found.ownerPids.map { Int($0) },
                 "windows": found.windows.map { $0.json }, "truncated": found.truncated,
+                "skipped": found.skipped,
                 "window_scope": "onscreen_only", "window_titles": "not_read",
             ]
         }
@@ -180,7 +182,7 @@ struct SystemObservationBackend: ObservationBackend {
         return (Double(point.x), Double(main.height - point.y))
     }
 
-    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool) {
+    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool, skipped: Int) {
         guard
             let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
                 as? [[String: Any]]
@@ -193,6 +195,8 @@ struct SystemObservationBackend: ObservationBackend {
         var owners: [Int32] = []
         var windows: [ObservedWindow] = []
         var truncated = false
+        // Windows of the bundle left out because the list entry lacks a number, layer or bounds.
+        var skipped = 0
         for (zIndex, info) in list.enumerated() {
             guard let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pid > 0 else { continue }
             let match =
@@ -203,7 +207,10 @@ struct SystemObservationBackend: ObservationBackend {
                 let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue,
                 let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
                 let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary)
-            else { continue }
+            else {
+                skipped += 1
+                continue
+            }
             if !owners.contains(pid) {
                 if owners.count == maxObservedProcesses {
                     truncated = true
@@ -215,14 +222,14 @@ struct SystemObservationBackend: ObservationBackend {
                 truncated = true
                 break
             }
-            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue
             windows.append(
                 ObservedWindow(
                     windowId: number, ownerPid: pid, layer: layer, x: Double(bounds.origin.x),
                     y: Double(bounds.origin.y), width: Double(bounds.width), height: Double(bounds.height),
                     alpha: alpha, zIndex: zIndex))
         }
-        return (owners.sorted(), windows, truncated)
+        return (owners.sorted(), windows, truncated, skipped)
     }
 }
 
@@ -233,6 +240,8 @@ struct SystemObservationBackend: ObservationBackend {
 /// other bundle id has no windows.
 struct FakeObservationBackend: ObservationBackend {
     static let failingBundleId = "org.local.reach.fake-failure"
+    /// One window without an alpha value and two entries skipped for lacking bounds or a layer.
+    static let partialBundleId = "org.local.reach.fake-partial"
 
     var name: String { "fake" }
 
@@ -245,11 +254,21 @@ struct FakeObservationBackend: ObservationBackend {
 
     func pointerLocation() throws -> (x: Double, y: Double) { (100.5, 200.25) }
 
-    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool) {
+    func bundleWindows(bundleId: String) throws -> (ownerPids: [Int32], windows: [ObservedWindow], truncated: Bool, skipped: Int) {
         if bundleId == FakeObservationBackend.failingBundleId {
             throw ObservationFailure("fake window list failure")
         }
-        guard bundleId == fixtureBundleId else { return ([], [], false) }
+        if bundleId == FakeObservationBackend.partialBundleId {
+            return (
+                [43],
+                [
+                    ObservedWindow(
+                        windowId: 9, ownerPid: 43, layer: 0, x: 0, y: 0, width: 10, height: 10, alpha: nil, zIndex: 3)
+                ],
+                false, 2
+            )
+        }
+        guard bundleId == fixtureBundleId else { return ([], [], false, 0) }
         return (
             [42],
             [
@@ -258,7 +277,7 @@ struct FakeObservationBackend: ObservationBackend {
                 ObservedWindow(
                     windowId: 8, ownerPid: 42, layer: 20, x: 120, y: 300, width: 240, height: 40, alpha: 1, zIndex: 1),
             ],
-            false
+            false, 0
         )
     }
 }

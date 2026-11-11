@@ -511,12 +511,23 @@ fn the_system_backend_is_reached_only_through_the_startup_guard() {
 }
 
 /// Swift source without `//` comment lines (doc comments included), so a comment that names
-/// a call does not count as one.
+/// a call does not count as one. Backticks are removed too, so `` `authorize` `` reads as
+/// `authorize` (plan review P31-2).
 fn swift_code(text: &str) -> String {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n")
+        .replace('`', "")
+}
+
+/// `typealias X = SystemInputLaunch` in any spelling of whitespace.
+fn aliases_system_input_launch(code: &str) -> bool {
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.split("typealias").skip(1).any(|stmt| {
+        stmt.split_once('=')
+            .is_some_and(|(_, rhs)| rhs.starts_with("SystemInputLaunch"))
+    })
 }
 
 fn is_ident(c: char) -> bool {
@@ -590,7 +601,8 @@ fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
     for (name, lines) in expected {
         let mut found = Vec::new();
         for file in &files {
-            for line in call_sites(&swift_code(&read(file)), name) {
+            // Every use counts, not only calls: `let f = makeInputController` is a use too.
+            for line in token_sites(&swift_code(&read(file)), name, false) {
                 found.push(format!("{file}: {line}"));
             }
         }
@@ -601,10 +613,11 @@ fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
     // typealias, no stored reference to `authorize`.
     let mut found = Vec::new();
     for file in &files {
-        if file == SYSTEM_BACKEND_FILE {
-            continue;
-        }
         let code = swift_code(&read(file));
+        assert!(
+            !aliases_system_input_launch(&code),
+            "{file} aliases SystemInputLaunch"
+        );
         assert!(
             !extends_system_input_launch(&code),
             "{file} extends SystemInputLaunch"
@@ -621,8 +634,13 @@ fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
             "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,",
             "ReachAgent.swift: controller: InputController?, launch: SystemInputLaunch?",
             "ReachAgent.swift: guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {",
+            "ReachAgentInputSystem.swift: struct SystemInputLaunch {",
+            "ReachAgentInputSystem.swift: static func authorize(enableInput: Bool, testMode: Bool) -> SystemInputLaunch? {",
+            "ReachAgentInputSystem.swift: return SystemInputLaunch()",
+            "ReachAgentInputSystem.swift: func requestPostEventAccess(_ launch: SystemInputLaunch) {",
+            "ReachAgentInputSystem.swift: func makeSystemInputBackend(_ launch: SystemInputLaunch) -> (sampler: InputSampler, poster: EventPoster) {",
         ],
-        "uses of SystemInputLaunch outside {SYSTEM_BACKEND_FILE}"
+        "uses of SystemInputLaunch"
     );
 }
 
@@ -674,6 +692,29 @@ fn the_call_site_scan_catches_the_known_bypasses() {
     let r = "let f = SystemInputLaunch.authorize\n";
     assert!(call_sites(r, "authorize").is_empty());
     assert_eq!(token_sites(r, "SystemInputLaunch", false).len(), 1);
+    // P31-2 (d): backticks around the name.
+    let d = swift_code("SystemInputLaunch.`authorize`(enableInput: true, testMode: false)");
+    assert_eq!(call_sites(&d, "authorize").len(), 1);
+    // (e) A stored function reference: only an every-use scan sees it.
+    let e = "let f = SystemInputLaunch.authorize\nf(true, false)\n";
+    assert!(call_sites(e, "authorize").is_empty());
+    assert_eq!(token_sites(e, "authorize", false).len(), 1);
+    // (f) A typealias of the type, from any file.
+    assert!(aliases_system_input_launch(
+        "typealias ProbeL = SystemInputLaunch"
+    ));
+    assert!(aliases_system_input_launch(
+        "typealias  ProbeL\n = SystemInputLaunch\n"
+    ));
+    assert!(!aliases_system_input_launch("typealias A = Int"));
+    // (h) Backticks around `makeInputController`.
+    let h =
+        swift_code("`makeInputController`(ServeConfig(socket: s, testMode: false, input: nil))");
+    assert_eq!(token_sites(&h, "makeInputController", false).len(), 1);
+    // (i) A stored reference to `makeInputController`.
+    let i = "let f = makeInputController\nf(config)\n";
+    assert!(call_sites(i, "makeInputController").is_empty());
+    assert_eq!(token_sites(i, "makeInputController", false).len(), 1);
     // Word boundaries: longer identifiers are not hits, and comment lines are dropped.
     assert!(call_sites("reauthorize(x) authorizeAll(y)", "authorize").is_empty());
     let comments = swift_code("// authorize(enableInput: true, testMode: false)\n/// authorize(x)");
@@ -694,6 +735,11 @@ const SWIFT_FORBIDDEN_EVERYWHERE: &[&str] = &[
     "activateIgnoringOtherApps",
     "NSAppleScript",
     "NSUserAppleScriptTask",
+    "Process.launchedProcess",
+    "posix_spawn",
+    "system(",
+    ".open(",
+    "openApplication",
 ];
 
 fn forbidden_everywhere_hits(code: &str) -> Vec<String> {
@@ -733,6 +779,12 @@ fn no_reach_agent_file_moves_the_pointer_spawns_or_activates() {
         "app.activate(options: [])",
         "NSApp\n  .activate (ignoringOtherApps: true)",
         "app.activateIgnoringOtherApps(true)",
+        "let p = Process.launchedProcess(launchPath: a, arguments: [])",
+        "posix_spawn(&pid, path, nil, nil, argv, nil)",
+        "system(\"ls\")",
+        "NSWorkspace.shared.open(url)",
+        "NSWorkspace.shared\n  .open (url)",
+        "NSWorkspace.shared.openApplication(at: u, configuration: c)",
     ] {
         assert!(
             !forbidden_everywhere_hits(sample).is_empty(),
@@ -743,6 +795,8 @@ fn no_reach_agent_file_moves_the_pointer_spawns_or_activates() {
         "ProcessInfo.processInfo.environment",
         "kernelStart(pid)",
         "var p: Process?",
+        "let app = NSWorkspace.shared.frontmostApplication",
+        "fileSystem(x)",
     ] {
         assert!(
             forbidden_everywhere_hits(sample).is_empty(),
