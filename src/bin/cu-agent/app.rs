@@ -1,7 +1,9 @@
-//! One read-only computer-use JSON request per process. Never sends input.
+//! One computer-use JSON request per process. It never sends input itself: a foreground
+//! `action` goes to ReachAgent only, which refuses unless it was started with `--enable-input`.
 use mac_computer_use::{
-    agent_client, interpretation, observe_with_evidence, overlay_session, Backend, MacBackend,
-    Target,
+    agent_client,
+    foreground_input::{self, Status},
+    interpretation, observe_with_evidence, overlay_session, Backend, MacBackend, Target,
 };
 use serde_json::{json, Value};
 use std::{
@@ -160,6 +162,15 @@ fn valid_bundle_result(value: &Value, bundle: &str) -> bool {
     })
 }
 fn describe() -> Value {
+    let mut d = describe_methods();
+    d["methods"]["action"]["foreground"] = json!({
+        "fields":["delivery","target","observation","event","evidence_dir"],
+        "availability":"disabled by default; only through ReachAgent started with --enable-input; no helper fallback; never through MCP",
+        "events":["pointer_move","click (left button)","key_tap (no modifiers)"],
+        "statuses":["unsupported","refused","posted_unverified","delivery_unknown","agent_unavailable"]});
+    d
+}
+fn describe_methods() -> Value {
     json!({"methods":{
       "describe":{"fields":[]},
       "sample_isolation":{"fields":["isolation_helper"],"availability":"read-only baseline; not a safety proof"},
@@ -190,12 +201,12 @@ fn describe() -> Value {
       "recognize_image":{"fields":["image","adapter"],"availability":"trusted local image adapter; offline review only"},
       "interpret_image":{"fields":["image","adapters","output"],"availability":"1 to 4 trusted local adapters on one saved PNG; exclusive evidence record; never input authority"},
       "overlay_session":{"fields":["overlay_helper","timeout_ms","steps"],"availability":"display-only cursor overlay for the length of one call; never sends input; never input authority"},
-      "action":{"fields":["event"],"availability":"unsupported","event_schema":"not defined; object with a nonempty kind is accepted only to report unsupported"}},
+      "action":{"fields":["event"],"availability":"unsupported","event_schema":"legacy form; object with a nonempty kind is accepted only to report unsupported"}},
       "request":"one UTF-8 JSON object on stdin; close stdin after request",
       "id":"required nonempty string, at most 128 bytes",
-      "exit_codes":{"0":"read-only result","3":"unknown or unsupported","1":"invalid request or incomplete observation"},
+      "exit_codes":{"0":"read-only result","3":"unknown, unsupported, agent_unavailable or posted_unverified","1":"invalid request, incomplete observation, refused or delivery_unknown"},
       "warning":"helper executable paths are trusted caller inputs; inspect binaries and permissions before use",
-      "safety":"no response authorizes input; action never posts an event"})
+      "safety":"no response authorizes input; only a foreground action through an armed ReachAgent can post one event, and its result is never verified"})
 }
 /// `describe` plus the ReachAgent route: which fields skip the helpers, and the App's state.
 fn describe_with_agent(agent: Value) -> Value {
@@ -285,6 +296,162 @@ fn routed(v: &Value, id: &str, method: &str) -> ExitCode {
             }
             emit_agent(id, method, "error", result)
         }
+    }
+}
+/// An `action` request in the foreground form (it names `delivery`). The legacy
+/// `{event}` form stays `unsupported` and never touches the socket.
+fn is_foreground_action(v: &Value) -> bool {
+    v["method"] == "action" && v.get("delivery").is_some()
+}
+/// The keys of every `action` outcome from ReachAgent.
+const ACTION_RESULT_KEYS: &[&str] = &[
+    "status",
+    "action_allowed",
+    "gate",
+    "reason",
+    "attempted",
+    "release_attempted",
+    "release_confirmed",
+    "attempt_file",
+    "result_file",
+];
+/// Check one `action` outcome from ReachAgent. It must be exactly the outcome shape,
+/// with one of the four statuses and `action_allowed:false`.
+fn action_outcome_status(result: &Value) -> Result<Status, String> {
+    let o = result.as_object().ok_or("action result is not an object")?;
+    if o.len() != ACTION_RESULT_KEYS.len() || ACTION_RESULT_KEYS.iter().any(|k| !o.contains_key(*k))
+    {
+        return Err("action result has unexpected fields".into());
+    }
+    if o["action_allowed"] != false {
+        return Err("action result must keep action_allowed false".into());
+    }
+    let status = match o["status"].as_str() {
+        Some("unsupported") => Status::Unsupported,
+        Some("refused") => Status::Refused,
+        Some("posted_unverified") => Status::PostedUnverified,
+        Some("delivery_unknown") => Status::DeliveryUnknown,
+        _ => return Err("action result has an unknown status".into()),
+    };
+    let text_or_null = |k: &str| o[k].is_null() || o[k].as_str().is_some_and(|s| s.len() <= 4096);
+    let flag = |k: &str| o[k].is_boolean();
+    if !["gate", "reason", "attempt_file", "result_file"]
+        .iter()
+        .all(|k| text_or_null(k))
+        || !["attempted", "release_attempted", "release_confirmed"]
+            .iter()
+            .all(|k| flag(k))
+    {
+        return Err("action result has a malformed field".into());
+    }
+    match status {
+        Status::PostedUnverified if o["attempted"] != true || !o["gate"].is_null() => {
+            Err("posted_unverified needs attempted true and no gate".into())
+        }
+        Status::Unsupported | Status::Refused | Status::DeliveryUnknown
+            if o["gate"].as_str().is_none() =>
+        {
+            Err("a stopped action needs a gate".into())
+        }
+        _ => Ok(status),
+    }
+}
+fn emit_action(id: &str, status: &str, code: u8, result: Value) -> ExitCode {
+    println!("{}", response(Some(id), Some("action"), status, result));
+    ExitCode::from(code)
+}
+fn stopped(gate: &str, reason: &str, attempted: Value, detail: Value) -> Value {
+    json!({"gate":gate,"reason":reason,"action_allowed":false,"attempted":attempted,"detail":detail})
+}
+/// Foreground `action`: strict parse, then exactly one call to ReachAgent. There is no
+/// helper path and no retry; replay protection and the one-event rule live in the App.
+fn foreground_action(v: &Value, id: &str) -> ExitCode {
+    let request = match foreground_input::parse_request(v) {
+        Ok(request) => request,
+        Err(rejection) => {
+            return emit_action(
+                id,
+                rejection.status.as_str(),
+                rejection.status.exit_code(),
+                stopped(rejection.gate, &rejection.reason, json!(false), Value::Null),
+            )
+        }
+    };
+    debug_assert_eq!(request.id, id);
+    let socket = match agent_client::default_socket_path() {
+        Ok(socket) => socket,
+        Err(reason) => return emit_action(id, "error", 1, json!({"reason":reason})),
+    };
+    let mut params = v.clone();
+    if let Some(o) = params.as_object_mut() {
+        o.remove("id");
+        o.remove("method");
+    }
+    match agent_client::call(&socket, id, "action", &params, agent_client::CALL_TIMEOUT) {
+        Ok(result) => match action_outcome_status(&result) {
+            Ok(status) => emit_action(id, status.as_str(), status.exit_code(), result),
+            Err(reason) => emit_action(
+                id,
+                Status::DeliveryUnknown.as_str(),
+                Status::DeliveryUnknown.exit_code(),
+                stopped(
+                    "transport",
+                    "agent_result_mismatch",
+                    Value::Null,
+                    json!({"reason":reason,"note":"an event may have been posted; read the receipts; do not retry"}),
+                ),
+            ),
+        },
+        Err(agent_client::CallError::Unavailable(reason)) => emit_action(
+            id,
+            "agent_unavailable",
+            3,
+            json!({
+                "reason":reason,
+                "socket":socket.display().to_string(),
+                "start":agent_client::start_hint(&socket),
+                "fallback":"none",
+                "attempted":false
+            }),
+        ),
+        Err(agent_client::CallError::Agent(f)) if f.code == "unknown_method" => emit_action(
+            id,
+            Status::Unsupported.as_str(),
+            Status::Unsupported.exit_code(),
+            stopped(
+                "G1",
+                "input_disabled",
+                json!(false),
+                json!({"agent_error":f.message,"start":"start ReachAgent with --enable-input; see docs/AGENT-SERVICE.md"}),
+            ),
+        ),
+        Err(agent_client::CallError::Agent(f)) => {
+            let mut error = json!({"code": f.code, "message": f.message});
+            if let Some(permission) = &f.permission {
+                error["permission"] = json!(permission);
+            }
+            if let Some(state) = &f.state {
+                error["state"] = json!(state);
+            }
+            emit_action(
+                id,
+                "error",
+                1,
+                json!({"reason":format!("{}: {}", f.code, f.message),"agent_error":error,"attempted":false}),
+            )
+        }
+        // The request line may have reached the App: delivery is unknown, never retried.
+        Err(agent_client::CallError::Protocol(reason)) => emit_action(
+            id,
+            Status::DeliveryUnknown.as_str(),
+            Status::DeliveryUnknown.exit_code(),
+            stopped(
+                "transport",
+                "reply_lost",
+                Value::Null,
+                json!({"reason":reason,"note":"an event may have been posted; read the receipts; do not retry"}),
+            ),
+        ),
     }
 }
 fn emit_agent(id: &str, method: &str, status: &str, result: Value) -> ExitCode {
@@ -1074,6 +1241,11 @@ pub fn main() -> ExitCode {
             )
         );
         return ExitCode::FAILURE;
+    }
+    if is_foreground_action(&v) {
+        if let Some(id) = id {
+            return foreground_action(&v, id);
+        }
     }
     if agent_client::is_routed(&v) {
         if let (Some(id), Some(method)) = (id, method) {

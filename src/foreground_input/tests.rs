@@ -257,6 +257,11 @@ fn rejects_non_left_button_and_bad_numbers() {
         json!({"kind": "click", "button": "left", "x": "1", "y": 1.0}),
         json!({"kind": "key_tap", "keycode": -1}),
         json!({"kind": "key_tap", "keycode": 128}),
+        json!({"kind": "key_tap", "keycode": 55}),
+        json!({"kind": "key_tap", "keycode": 57}),
+        json!({"kind": "key_tap", "keycode": 63}),
+        json!({"kind": "key_tap", "keycode": 103}),
+        json!({"kind": "key_tap", "keycode": 0}),
         json!({"kind": "key_tap", "keycode": 1.5}),
         json!({"kind": "key_tap"}),
     ] {
@@ -324,6 +329,15 @@ fn arming_accepts_only_approved_bundles_and_bounded_values() {
     assert!(Arming::new(&["com.google.Chrome"], &[36], now, ttl, 1).is_err());
     assert!(Arming::new(&["*"], &[36], now, ttl, 1).is_err());
     assert!(Arming::new(&[SAFARI], &[128], now, ttl, 1).is_err());
+    // Only the six plan keys (plan 1.3, Q10): no modifier, Fn, Caps Lock or system key.
+    for k in APPROVED_KEYCODES {
+        assert!(Arming::new(&[SAFARI], &[*k], now, ttl, 1).is_ok(), "{k}");
+    }
+    for k in [
+        0, 3, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 103, 122, 127,
+    ] {
+        assert!(Arming::new(&[SAFARI], &[k], now, ttl, 1).is_err(), "{k}");
+    }
     assert!(Arming::new(&[SAFARI], &[36], now, Duration::ZERO, 1).is_err());
     assert!(Arming::new(&[SAFARI], &[36], now, MAX_ARM_TTL, 1).is_ok());
     assert!(Arming::new(
@@ -561,7 +575,8 @@ fn g2_bundle_and_keycode_must_be_on_the_lists() {
     refused(&out, "G2", "bundle_not_allowed");
     assert!(fake.calls.is_empty());
 
-    let v = request_json(json!({"kind": "key_tap", "keycode": 0}));
+    // 18 is an approved key but not in this arming ([36, 49]).
+    let v = request_json(json!({"kind": "key_tap", "keycode": 18}));
     let (out, _, fake) = submit(&mut gate, &v, now);
     refused(&out, "G2", "keycode_not_allowed");
     assert!(fake.calls.is_empty());

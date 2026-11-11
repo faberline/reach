@@ -1002,7 +1002,7 @@ mod tests {
             include_str!("../build-agent-app.sh"),
         ] {
             assert!(script.contains(
-                "ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift"
+                "ReachAgent.swift ReachAgentCapture.swift ReachAgentAccessibility.swift ReachAgentInput.swift ReachAgentInputSystem.swift"
             ));
         }
     }

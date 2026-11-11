@@ -1,14 +1,14 @@
 # 前景輸入的離線模型（計畫 I-1）
 
-**這是離線模型，尚無真實投遞。** `action` 在 `cu-agent` 仍一律回報 `unsupported`，每個回應的 `action_allowed` 仍為 `false`；`cu-agent` 與 `cu-mcp` 沒有使用這個模型，`describe` 的輸出沒有變。輸入仍停用，本文件不改變 README、CAPABILITIES、AGENT-CLI、BACKGROUND-INPUT 的任何敘述。
+**這是離線模型，本身不投遞。** 每個回應的 `action_allowed` 仍為 `false`。I-2（issue #27）之後，`cu-agent` 只用這個模型檢查前景 `action` 請求的格式，再轉給 ReachAgent；閘門、重放防護與收據在 ReachAgent 內以 Swift 移植（`ReachAgentInput.swift`），順序、閘門名稱與原因字串都相同。`cu-mcp` 不使用這個模型，也不提供輸入。輸入預設停用，啟動方式見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「輸入模式」。
 
 模型的來源是已核准的計畫 `docs/plans/input-injection-plan.md`（第 3、4.3、4.4 節與 I-1）。程式在 `src/foreground_input.rs`，`input_guard` 加了前景變體 `review_foreground`。整個模型只有純 Rust 資料與 trait，不呼叫任何事件投遞 API、不用 FFI、不啟動程序。唯一的 `EventPoster` 實作是測試用的假後端。
 
 ## 範圍
 
-- 三種事件：`pointer_move`、`click`（只接受左鍵、視窗內點座標）、`key_tap`（鍵碼 0 至 127、無修飾鍵）。沒有拖曳、滾輪、修飾鍵、文字輸入、啟用 App。
+- 三種事件：`pointer_move`、`click`（只接受左鍵、視窗內點座標）、`key_tap`（只接受計畫 1.3 的六個鍵碼 18、23、36、38、44、49；修飾鍵 54 至 63、功能鍵與系統鍵一律拒絕）。沒有拖曳、滾輪、修飾鍵、文字輸入、啟用 App。
 - 請求欄位嚴格比對，任何未知欄位都拒絕（`refused`，閘門 `schema`）。`delivery` 只接受 `foreground`；`background` 回報 `unsupported`（閘門 `delivery`）。
-- 允許清單只有 `org.local.rust-computer-use.target-event-fixture` 與 `com.apple.Safari`；Chrome 未核准。`Arming::new` 拒絕清單外的 bundle id（沒有萬用字元）、超過 10 分鐘的到期、零事件數或超過 `MAX_ARM_EVENTS`（20）的事件數、大於 127 的鍵碼。計畫 Q6 只要求每次啟用設事件數上限、沒有給數字；20 是為 I-4 至 I-6 的少量單擊與按鍵實驗選的保守上限，實機核准時可再調。
+- 允許清單只有 `org.local.rust-computer-use.target-event-fixture` 與 `com.apple.Safari`；Chrome 未核准。`Arming::new` 拒絕清單外的 bundle id（沒有萬用字元）、超過 10 分鐘的到期、零事件數或超過 `MAX_ARM_EVENTS`（20）的事件數、`APPROVED_KEYCODES` 以外的鍵碼。計畫 Q6 只要求每次啟用設事件數上限、沒有給數字；20 是為 I-4 至 I-6 的少量單擊與按鍵實驗選的保守上限，實機核准時可再調。
 - 四種狀態與結束碼：`unsupported`（3）、`refused`（1）、`posted_unverified`（3）、`delivery_unknown`（1）。
 
 ## 閘門
@@ -46,4 +46,4 @@ G3、G7 至 G9 所需的事實由後端提供（`LiveFacts`，包含 `current_bu
 
 ## 尚未做的事
 
-ReachAgent 輸入後端、`--enable-input`、`describe` 的 `input` 區塊、MCP 不暴露輸入的過濾與測試，都屬於計畫的 I-2（issue #27）。實機驗證屬於 I-4 之後。
+I-2（issue #27）加入了 ReachAgent 輸入後端骨架、`--enable-input`、`describe` 的 `input` 區塊，以及 MCP 不暴露輸入的過濾，見 [AGENT-SERVICE.md](AGENT-SERVICE.md)。系統後端的即時取樣（焦點、HID 閒置、安全輸入、輸入法、遮擋）屬於 I-3，目前一律視為不安全。實機驗證屬於 I-4 之後。

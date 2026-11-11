@@ -2,7 +2,7 @@
 
 本介面不屬於任何特定 agent；任何能啟動程序並讀寫 JSON 的程式都能使用。文中 `<REACH_DIR>` 代表本儲存庫在呼叫者環境中的絕對路徑；helper 路徑與輸出路徑必須使用呼叫者目前環境中的絕對路徑。
 
-`cu-agent` 接收一筆 JSON，執行一次呼叫，再輸出一筆 JSON。它可供 Agent 直接使用，或經由 [MCP stdio 包裝](MCP.md) 使用；`cu-agent` 本身不是 MCP server。它支援唯讀觀察與保存擷取證據，不發送輸入。
+`cu-agent` 接收一筆 JSON，執行一次呼叫，再輸出一筆 JSON。它可供 Agent 直接使用，或經由 [MCP stdio 包裝](MCP.md) 使用；`cu-agent` 本身不是 MCP server。它支援唯讀觀察與保存擷取證據；它自己不發送輸入，前景 `action` 只轉給 ReachAgent（預設停用）。
 
 ```sh
 cd <REACH_DIR>
@@ -57,6 +57,7 @@ stdin 接收一筆 UTF-8 JSON；送出後須關閉 stdin。大小上限 65,536 b
 - `session_status`：透過可信 `session_helper` 唯讀取得目前登入工作階段的 console 和登入狀態；詳見 [隔離工作階段](ISOLATED-SESSION.md)。結果不能識別遠端工作階段或證明輸入隔離。
 - `sample_isolation`：唯讀取樣使用者環境；詳見 [隔離取樣說明](ISOLATION-OBSERVATION.md)。結果不證明輸入安全。
 - `action`：可傳入含非空 `kind` 的 `event` 物件，以取得明確的 `unsupported`。事件內容的 schema 尚未定義，也不經驗證。此呼叫不發送任何滑鼠、鍵盤或其他事件。
+- `action`（前景，計畫 I-2）：含 `delivery` 欄位的 `action` 請求有固定欄位 `delivery`、`target`、`observation`、`event`、`evidence_dir`，`cu-agent` 先以離線模型（[FOREGROUND-INPUT-MODEL.md](FOREGROUND-INPUT-MODEL.md)）嚴格檢查格式，不合格就回 `refused`（閘門 `schema`），不連線 ReachAgent。合格的請求只送給 ReachAgent 一次，不重試，沒有 helper 退路：App 不在時回 `agent_unavailable`（狀態碼 3，`fallback: "none"`）；App 未以 `--enable-input` 啟動時回 `unsupported`（`G1`、`input_disabled`，狀態碼 3）。ReachAgent 的結果原樣轉回：`posted_unverified`（狀態碼 3，不是驗證）、`unsupported`（3）、`refused`（1）、`delivery_unknown`（1）。回覆格式不符或回覆遺失時是 `delivery_unknown`（閘門 `transport`），因為事件可能已送出。啟動方式與限制見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「輸入模式」。MCP 不提供這個方法。
 
 擷取範例：先確認本次的 PID 和視窗 ID，再替換 `12345`、`67890` 與 PNG 路徑。先依主 README 建置 helper。
 

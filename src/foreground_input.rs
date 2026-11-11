@@ -25,8 +25,10 @@ pub const APPROVED_BUNDLE_IDS: &[&str] = &[
 ];
 /// Longest lifetime of one arming (plan Q6: 10 minutes).
 pub const MAX_ARM_TTL: Duration = Duration::from_secs(600);
-/// macOS virtual key codes handled by this model are 0 through 127.
-pub const MAX_KEYCODE: u16 = 127;
+/// The only macOS virtual key codes v1 may send (plan 1.3 and Q10): 18, 23, 38, 44 (the
+/// Zhuyin keys), 49 (space) and 36 (Return). No modifier (54-63, including Fn and Caps Lock),
+/// no function or system key. ReachAgentInput.swift has the same list; a static test checks it.
+pub const APPROVED_KEYCODES: &[u16] = &[18, 23, 36, 38, 44, 49];
 /// Plan Q6 asks for an event limit per arming but gives no number. This is a
 /// conservative cap for the small click/key experiments of I-4 through I-6.
 pub const MAX_ARM_EVENTS: u32 = 20;
@@ -269,8 +271,8 @@ pub fn parse_request(v: &Value) -> Result<ActionRequest, Rejection> {
             let keycode = field(o, "event", "keycode")?
                 .as_u64()
                 .and_then(|n| u16::try_from(n).ok())
-                .filter(|n| *n <= MAX_KEYCODE)
-                .ok_or_else(|| schema("event.keycode must be 0 through 127"))?;
+                .filter(|n| APPROVED_KEYCODES.contains(n))
+                .ok_or_else(|| schema("event.keycode is not an approved key"))?;
             Event::KeyTap { keycode }
         }
         other => return Err(schema(format!("unsupported event kind {other:?}"))),
@@ -314,8 +316,8 @@ impl Arming {
         if let Some(b) = bundles.iter().find(|b| !APPROVED_BUNDLE_IDS.contains(b)) {
             return Err(format!("bundle id {b:?} is not approved"));
         }
-        if keycodes.iter().any(|k| *k > MAX_KEYCODE) {
-            return Err("keycode above 127".into());
+        if let Some(k) = keycodes.iter().find(|k| !APPROVED_KEYCODES.contains(k)) {
+            return Err(format!("keycode {k} is not approved"));
         }
         if ttl.is_zero() || ttl > MAX_ARM_TTL {
             return Err("ttl must be positive and at most 10 minutes".into());

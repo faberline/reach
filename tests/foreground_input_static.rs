@@ -1,7 +1,7 @@
 //! Offline source checks for the foreground input model (plan I-1). They read
 //! files only. Nothing in `src/` may deliver input events, and the model must
-//! stay free of FFI, process spawning and event APIs; `cu-agent` and `cu-mcp`
-//! must not reach it yet.
+//! stay free of FFI, process spawning and event APIs. `cu-agent` may only parse
+//! with it (plan I-2); `cu-mcp` never reaches it.
 //!
 //! The scan covers every `.rs` file under `src/`, so a new module cannot slip
 //! past it. A pattern is allowed only in files named in an explicit list below;
@@ -329,18 +329,244 @@ fn cargo_manifest_and_lockfile_have_no_event_or_ffi_crates() {
     }
 }
 
+/// Plan I-2: `cu-agent` uses the model only to parse an `action` request strictly before
+/// it forwards the request to ReachAgent. MCP and the other binaries never use it.
 #[test]
-fn agent_and_mcp_do_not_use_the_model_yet() {
+fn only_cu_agent_parses_with_the_model_and_mcp_never_does() {
     for rel in [
         "src/bin/cu-agent.rs",
-        "src/bin/cu-agent/app.rs",
         "src/bin/cu-mcp.rs",
         "src/mcp_server.rs",
         "src/main.rs",
     ] {
         assert!(
             !read(rel).contains("foreground_input"),
-            "{rel} must not use the offline model before plan I-2"
+            "{rel} must not use the input model"
         );
+    }
+    let app = read("src/bin/cu-agent/app.rs");
+    assert_eq!(app.matches("foreground_input::parse_request(").count(), 1);
+    for needle in ["InputGate", "Arming", ".submit(", "LiveFacts"] {
+        assert!(
+            !app.contains(needle),
+            "cu-agent must not run a gate itself: {needle}"
+        );
+    }
+    // The only call that sends `action` is the one ReachAgent call; no helper is spawned for it.
+    assert_eq!(app.matches("agent_client::call(").count(), 1);
+    assert!(app.contains("agent_client::call(&socket, id, \"action\""));
+}
+
+// ---- ReachAgent Swift sources (plan I-2) ----
+
+/// The one Swift file that may name an event delivery API.
+const SYSTEM_BACKEND_FILE: &str = "ReachAgentInputSystem.swift";
+
+/// Every Swift file the build scripts compile into ReachAgent, read from the
+/// `swiftc` line of each script. Both scripts must compile the same list.
+fn reach_agent_swift_files() -> Vec<String> {
+    let mut lists = Vec::new();
+    for script in ["build-agent.sh", "build-agent-app.sh"] {
+        let text = read(script);
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("swiftc ") && l.contains("ReachAgent.swift"))
+            .unwrap_or_else(|| panic!("{script} has no ReachAgent swiftc line"));
+        let files: Vec<String> = line
+            .split_whitespace()
+            .filter(|t| t.ends_with(".swift"))
+            .map(str::to_string)
+            .collect();
+        lists.push(files);
+    }
+    assert_eq!(lists[0], lists[1], "build scripts compile different files");
+    let files = lists.remove(0);
+    assert!(files.contains(&SYSTEM_BACKEND_FILE.to_string()));
+    assert!(files.len() >= 5, "too few ReachAgent files: {files:?}");
+    files
+}
+
+/// Event delivery, AX action and post-event permission request APIs.
+const SWIFT_DELIVERY_PATTERNS: &[&str] = &[
+    ".post(tap:",
+    "postToPid",
+    "CGEventPost",
+    "CGEvent(",
+    "CGEventSource",
+    "CGEventTapPostEvent",
+    "CGPostKeyboardEvent",
+    "CGPostMouseEvent",
+    "AXUIElementPerformAction",
+    "AXUIElementPostKeyboardEvent",
+    "AXUIElementSetAttributeValue",
+    "CGRequestPostEventAccess",
+    "IOHIDPostEvent",
+    "NSAppleScript",
+];
+
+#[test]
+fn only_the_system_backend_file_names_event_delivery_apis() {
+    let mut problems = Vec::new();
+    for file in reach_agent_swift_files() {
+        if file == SYSTEM_BACKEND_FILE {
+            continue;
+        }
+        let text = read(&file);
+        for needle in SWIFT_DELIVERY_PATTERNS {
+            if text.contains(needle) {
+                problems.push(format!("{file}: {needle:?}"));
+            }
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "event delivery API outside {SYSTEM_BACKEND_FILE}:\n{}",
+        problems.join("\n")
+    );
+    // The system file really is the delivery file, so the scan is not vacuous.
+    let system = read(SYSTEM_BACKEND_FILE);
+    for needle in [".post(tap:", "CGEvent(", "CGRequestPostEventAccess"] {
+        assert!(
+            system.contains(needle),
+            "{SYSTEM_BACKEND_FILE} lacks {needle}"
+        );
+    }
+}
+
+#[test]
+fn the_system_backend_has_no_forbidden_input_kinds() {
+    let system = read(SYSTEM_BACKEND_FILE);
+    for needle in [
+        "scrollWheel",
+        "Dragged",
+        "rightMouse",
+        "otherMouse",
+        "maskCommand",
+        "maskShift",
+        "maskAlternate",
+        "maskControl",
+        ".activate(",
+        "postToPid",
+        "AXUIElement",
+        "com.google.Chrome",
+        "NSAppleScript",
+    ] {
+        assert!(
+            !system.contains(needle),
+            "{SYSTEM_BACKEND_FILE} mentions {needle}"
+        );
+    }
+    assert!(
+        system.contains("fileprivate init()"),
+        "SystemInputLaunch must keep a fileprivate initializer"
+    );
+}
+
+/// The system backend is reachable only through `SystemInputLaunch.authorize`,
+/// which refuses `--test-mode`, a non-empty `CI` and a launch without input.
+#[test]
+fn the_system_backend_is_reached_only_through_the_startup_guard() {
+    let system = read(SYSTEM_BACKEND_FILE);
+    let authorize = system
+        .split("static func authorize(")
+        .nth(1)
+        .expect("authorize exists")
+        .split("\n    }\n")
+        .next()
+        .unwrap();
+    assert!(authorize.contains("guard enableInput, !testMode else { return nil }"));
+    assert!(authorize.contains("environment[\"CI\"]"));
+    assert_eq!(system.matches("SystemInputLaunch()").count(), 1);
+    assert!(system.contains("func makeSystemInputBackend(_ launch: SystemInputLaunch)"));
+    assert!(system.contains("func requestPostEventAccess(_ launch: SystemInputLaunch)"));
+
+    for file in reach_agent_swift_files() {
+        if file == SYSTEM_BACKEND_FILE {
+            continue;
+        }
+        let text = read(&file);
+        assert!(
+            !text.contains("SystemInputLaunch()"),
+            "{file} constructs SystemInputLaunch directly"
+        );
+        let expected = usize::from(file == "ReachAgent.swift");
+        assert_eq!(
+            text.matches("makeSystemInputBackend(").count(),
+            expected,
+            "{file}: makeSystemInputBackend calls"
+        );
+        assert_eq!(
+            text.matches("requestPostEventAccess(").count(),
+            expected,
+            "{file}: requestPostEventAccess calls"
+        );
+    }
+    // `authorize` reads the process environment itself; no caller can hand it one.
+    assert!(authorize.contains("ProcessInfo.processInfo.environment[\"CI\"]"));
+    assert!(system.contains(
+        "static func authorize(enableInput: Bool, testMode: Bool) -> SystemInputLaunch?"
+    ));
+    let agent = read("ReachAgent.swift");
+    assert!(agent.contains("input_unavailable"));
+}
+
+/// Every call site of the start-up guard and of `makeInputController`, as exact lines.
+/// This is a guard against mistakes, not a security boundary: it fails when a new call
+/// appears (for example a self-test that reaches the system path with `testMode: false`).
+#[test]
+fn the_startup_guard_and_input_controller_have_only_the_known_call_sites() {
+    let expected: &[(&str, &[&str])] = &[
+        (
+            "SystemInputLaunch.authorize(",
+            &[
+                "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,",
+                "ReachAgent.swift: check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,",
+                "ReachAgent.swift: guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {",
+            ],
+        ),
+        (
+            "makeInputController(",
+            &[
+                "ReachAgent.swift: let made = try? makeInputController(testConfig)",
+                "ReachAgent.swift: (try? makeInputController(ServeConfig(socket: \"/tmp/x\", testMode: true, input: nil)))",
+                "ReachAgent.swift: func makeInputController(_ config: ServeConfig) throws -> (",
+                "ReachAgent.swift: let input = try makeInputController(config)",
+            ],
+        ),
+    ];
+    let files = reach_agent_swift_files();
+    for (needle, lines) in expected {
+        let mut found = Vec::new();
+        for file in &files {
+            for line in read(file)
+                .lines()
+                .filter(|l| l.contains(needle) && !l.trim_start().starts_with("//"))
+            {
+                found.push(format!("{file}: {}", line.trim()));
+            }
+        }
+        assert_eq!(found, *lines, "call sites of {needle}");
+    }
+}
+
+/// The Rust model and the Swift agent accept the same six keycodes (plan 1.3, Q10).
+#[test]
+fn rust_and_swift_approve_the_same_keycodes() {
+    let swift = read("ReachAgentInput.swift");
+    let line = swift
+        .lines()
+        .find(|l| l.starts_with("let approvedInputKeycodes = ["))
+        .expect("approvedInputKeycodes exists");
+    let list: Vec<u16> = line
+        .split('[')
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .unwrap()
+        .split(',')
+        .map(|n| n.trim().parse().unwrap())
+        .collect();
+    assert_eq!(list, mac_computer_use::foreground_input::APPROVED_KEYCODES);
+    for modifier in 54..=63 {
+        assert!(!list.contains(&modifier), "modifier {modifier} is approved");
     }
 }

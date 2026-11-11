@@ -342,6 +342,48 @@ fn status_failure(socket: &Path, error: &CallError) -> Value {
     }
 }
 
+/// The `input` block of ReachAgent's `describe`, checked and copied key by key.
+fn input_block(block: &Value) -> Option<Value> {
+    let o = block.as_object()?;
+    let state = o
+        .get("state")?
+        .as_str()
+        .filter(|s| ["armed", "disabled"].contains(s))?;
+    let backend = o
+        .get("backend")?
+        .as_str()
+        .filter(|s| ["fake", "system"].contains(s))?;
+    if o.len() == 2 {
+        return (state == "disabled").then(|| json!({"state": state, "backend": backend}));
+    }
+    let bundles = o.get("allowed_bundle_ids")?.as_array()?;
+    if !bundles.iter().all(|b| {
+        b.as_str()
+            .is_some_and(|b| crate::foreground_input::APPROVED_BUNDLE_IDS.contains(&b))
+    }) {
+        return None;
+    }
+    let keycodes = o.get("allowed_keycodes")?.as_array()?;
+    if !keycodes.iter().all(|k| {
+        k.as_u64()
+            .and_then(|k| u16::try_from(k).ok())
+            .is_some_and(|k| crate::foreground_input::APPROVED_KEYCODES.contains(&k))
+    }) {
+        return None;
+    }
+    let expires = o.get("expires_unix_seconds")?.as_f64()?;
+    let remaining = o.get("events_remaining")?.as_u64()?;
+    let halted = o.get("halted")?.as_bool()?;
+    if o.get("verified") != Some(&Value::Bool(false)) || o.len() != 8 {
+        return None;
+    }
+    Some(json!({
+        "state": state, "backend": backend, "allowed_bundle_ids": bundles,
+        "allowed_keycodes": keycodes, "expires_unix_seconds": expires,
+        "events_remaining": remaining, "halted": halted, "verified": false,
+    }))
+}
+
 /// For `describe`: the App's state, read with `describe` and `permissions` only.
 /// `socket` is `Err(reason)` when no socket path could be decided. Never fails.
 pub fn app_status(socket: Result<&Path, &str>) -> Value {
@@ -378,6 +420,14 @@ pub fn app_status(socket: Result<&Path, &str>) -> Value {
     ) else {
         return status_failure(socket, &protocol("permissions reply has unexpected fields"));
     };
+    // The `input` block exists only when ReachAgent started with `--enable-input`.
+    let input = match described.get("input") {
+        None => json!({"state": "disabled"}),
+        Some(block) => match input_block(block) {
+            Some(block) => block,
+            None => return status_failure(socket, &protocol("describe input block is malformed")),
+        },
+    };
     json!({
         "state": "running",
         "socket": socket.display().to_string(),
@@ -389,6 +439,7 @@ pub fn app_status(socket: Result<&Path, &str>) -> Value {
             "screen_recording": screen_recording,
             "post_event": post_event,
         },
+        "input": input,
     })
 }
 
@@ -839,6 +890,38 @@ mod tests {
     }
 
     #[test]
+    fn input_block_is_checked_key_by_key() {
+        let armed = json!({"state": "armed", "backend": "fake",
+            "allowed_bundle_ids": ["org.local.rust-computer-use.target-event-fixture"],
+            "allowed_keycodes": [18, 36], "expires_unix_seconds": 1.5e9,
+            "events_remaining": 2, "halted": false, "verified": false});
+        assert_eq!(input_block(&armed), Some(armed.clone()));
+        let off = json!({"state": "disabled", "backend": "system"});
+        assert_eq!(input_block(&off), Some(off));
+        for (key, bad) in [
+            ("state", json!("on")),
+            ("backend", json!("cgevent")),
+            ("allowed_bundle_ids", json!(["com.google.Chrome"])),
+            ("allowed_keycodes", json!([128])),
+            ("allowed_keycodes", json!([55])),
+            ("allowed_keycodes", json!([0])),
+            ("events_remaining", json!(-1)),
+            ("halted", json!("no")),
+            ("verified", json!(true)),
+            ("extra", json!(1)),
+        ] {
+            let mut v = armed.clone();
+            v[key] = bad;
+            assert_eq!(input_block(&v), None, "{key}");
+        }
+        assert_eq!(
+            input_block(&json!({"state": "armed", "backend": "fake"})),
+            None
+        );
+        assert_eq!(input_block(&json!([])), None);
+    }
+
+    #[test]
     fn app_status_reports_running_unavailable_and_error() {
         let describe = json!({"app": "ReachAgent", "app_version": "0.1.0", "protocol_version": 1,
                               "methods": [], "test_mode": true});
@@ -851,7 +934,8 @@ mod tests {
             json!({"state": "running", "socket": app.socket.display().to_string(),
                    "app_version": "0.1.0", "protocol_version": 1, "test_mode": true,
                    "permissions": {"accessibility": "granted", "screen_recording": "denied",
-                                   "post_event": "unknown"}})
+                                   "post_event": "unknown"},
+                   "input": {"state": "disabled"}})
         );
         let seen = app.finish();
         let methods: Vec<String> = seen

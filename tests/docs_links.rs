@@ -99,3 +99,50 @@ fn readme_states_agent_neutrality() {
         assert!(readme.contains(needle), "README.md lacks {needle:?}");
     }
 }
+
+/// Plan I-2 (faberline/reach#27): the docs say how input mode starts, its limits, and that
+/// input is disabled by default and never offered through MCP.
+#[test]
+fn docs_state_how_input_mode_starts_and_that_it_is_off_by_default() {
+    let read = |p: &str| fs::read_to_string(root().join(p)).unwrap();
+    let service = read("docs/AGENT-SERVICE.md");
+    for needle in [
+        "輸入模式",
+        "預設不送任何輸入事件",
+        "--enable-input",
+        "--allow-bundle",
+        "--input-ttl-seconds",
+        "--max-input-events",
+        "--allow-keycode",
+        "org.local.rust-computer-use.target-event-fixture",
+        "com.apple.Safari",
+        "Chrome 未核准",
+        "600",
+        "20",
+        "MCP 不能啟用輸入",
+        "假後端",
+        "ReachAgentInputSystem.swift",
+        "input_unavailable",
+        "`CI`",
+        "posted_unverified",
+        "delivery_unknown",
+        "events_remaining",
+        "從未實際執行過",
+        "不是安全邊界",
+        "防誤用",
+        "加入取樣後",
+        "18、23、36、38、44、49",
+    ] {
+        assert!(
+            service.contains(needle),
+            "docs/AGENT-SERVICE.md lacks {needle:?}"
+        );
+    }
+    let mcp = read("docs/MCP.md");
+    assert!(mcp.contains("`tools/list` 不列出它們") && mcp.contains("`refused`"));
+    assert!(read("README.md").contains("**輸入預設停用**"));
+    let cli = read("docs/AGENT-CLI.md");
+    for needle in ["agent_unavailable", "input_disabled", "沒有 helper 退路"] {
+        assert!(cli.contains(needle), "docs/AGENT-CLI.md lacks {needle:?}");
+    }
+}

@@ -47,7 +47,35 @@ target/debug/ReachAgent --self-test
 | `accessibility` | `{"pid":<整數>,"windows_only":<布林，可省略>}` | 行程的 AX 視窗快照（見下） |
 | `accessibility_subtree` | `{"pid":<整數>,"source":"main"、"focused" 或 "windows","path":[<整數>,…]}` | 單一子樹的快照（見下） |
 
-只有明確呼叫 `request_permissions` 才會向系統要求權限。`post_event` 不能要求（輸入維持停用，見 issue #2），含它的請求回 `not_requestable`。
+只有明確呼叫 `request_permissions` 才會向系統要求權限。預設 `post_event` 不能要求，含它的請求回 `not_requestable`；只有以輸入模式啟動（見下方「輸入模式」）時，`post_event` 才能被明確要求。
+
+## 輸入模式（計畫 I-2，預設停用）
+
+**預設不送任何輸入事件。** 沒有 `--enable-input` 時，服務的行為與之前完全相同：`describe` 沒有 `action` 方法，`input` 區塊只有 `{"state":"disabled","backend":…}`，`action` 回 `unknown_method`，`post_event` 不能要求。
+
+```sh
+target/debug/ReachAgent --serve --socket <絕對路徑> [--test-mode] \
+  --enable-input --allow-bundle <bundle id> [--allow-bundle <bundle id>] \
+  [--allow-keycode <18|23|36|38|44|49>...] --input-ttl-seconds <1-600> --max-input-events <1-20>
+```
+
+- 啟用一定要同時給 `--allow-bundle`、`--input-ttl-seconds` 與 `--max-input-events`。沒有 `--enable-input` 卻給輸入選項、未知選項、重複選項，都是用法錯誤。
+- `--allow-bundle` 只接受 `org.local.rust-computer-use.target-event-fixture` 與 `com.apple.Safari`，沒有萬用字元；Chrome 未核准。
+- 到期最多 600 秒，事件數最多 20。鍵碼只接受計畫 1.3 與 Q10 列出的六個：18、23、36、38、44、49（注音鍵 18、23、38、44，Return 36，空白 49）；修飾鍵（54 至 63，含 Fn、Caps Lock）、功能鍵與系統鍵一律拒絕，啟用時與事件解析時各檢查一次。到期或事件數用完後，閘門拒絕所有請求，要以新的啟動重新啟用。MCP 不能啟用輸入。
+- 只有三種事件：`pointer_move`、左鍵 `click`、無修飾鍵的 `key_tap`。沒有拖曳、滾輪、修飾鍵、文字輸入、啟用 App。
+- `action` 的請求與閘門 G1 至 G13 與離線模型相同（[FOREGROUND-INPUT-MODEL.md](FOREGROUND-INPUT-MODEL.md)）。結果有 9 個欄位：`status`、`action_allowed`（永遠 `false`）、`gate`、`reason`、`attempted`、`release_attempted`、`release_confirmed`、`attempt_file`、`result_file`。成功投遞也只是 `posted_unverified`，不是驗證。`delivery_unknown` 之後閘門停機（G13）。
+- `action` 先檢查 `post_event`：不是 `granted` 就回 `permission_denied`，不進閘門。
+- `describe` 的 `input` 區塊：`state`（`armed`）、`backend`（`fake` 或 `system`）、`allowed_bundle_ids`、`allowed_keycodes`、`expires_unix_seconds`、`events_remaining`、`halted`、`verified`（永遠 `false`）。
+
+### 兩種後端
+
+- **假後端**（`--test-mode --enable-input`）：不呼叫任何系統 API，只記錄「會送出的事件」，收據寫進記憶體。`--self-test` 用它涵蓋啟用、到期、允許清單、拒絕、重放防護、單一事件規則、停機與收據。
+- **系統後端**（`ReachAgentInputSystem.swift`）：唯一可以呼叫事件投遞 API 與 `CGRequestPostEventAccess` 的檔案。它被編譯進 App。啟動時 `SystemInputLaunch.authorize` 在有 `--enable-input`、沒有 `--test-mode`、行程環境變數 `CI` 為空時才回傳值；它自己讀 `ProcessInfo.processInfo.environment`，呼叫端不能傳入環境。`--enable-input` 不帶 `--test-mode` 而在 CI 下啟動時，服務以 `input_unavailable` 結束。
+- 這些檢查是什麼、不是什麼：
+  - `--test-mode`、`CI` 檢查與靜態測試（`tests/foreground_input_static.rs`：投遞 API 只出現在這個檔案、沒有被禁止的事件種類、`SystemInputLaunch.authorize(` 與 `makeInputController(` 的呼叫點逐行列舉）都是**防誤用**的護欄，不是安全邊界。任何能在這台機器以 `--enable-input` 且不帶 `--test-mode` 啟動 ReachAgent、又沒有設定 `CI` 的人，都會拿到系統後端；修改原始碼的人也能改掉靜態測試。
+  - 目前真正讓系統後端送不出事件的，是即時事實的失敗即關閉：系統後端只唯讀取樣目標 App 的 bundle id 與是否為最前面的 App（G8，`NSWorkspace.frontmostApplication`）；焦點、HID 閒置、安全輸入、輸入法與遮擋尚未取樣（I-3），一律視為不安全，所以每個請求都會在 G7、G8 或 G9 被拒絕。
+  - I-3 加入取樣後這一點就不再成立：屆時條件都符合的請求會真的投遞事件，能擋住它的只剩啟用參數、允許清單、事件數與到期這些閘門，以及使用者給的 TCC 授權。
+- `--self-test` 只驗證 `--test-mode` 或沒有 `--enable-input` 時 `authorize` 一定回 nil，以及參數解析把 `--enable-input` 不帶 `--test-mode` 解析成系統路徑；它從不以 `testMode: false` 建立輸入控制器。`CI` 檢查讀真實環境，所以只有靜態測試涵蓋。系統後端從未實際執行過；真機驗證需要簽章與 TCC 授權，屬於 I-4 之後。
 
 ### 擷取
 

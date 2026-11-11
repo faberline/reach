@@ -55,7 +55,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"js
   - `reason`：只在 `wrapper_error` 時出現，說明原因。
 - **`isError`**：`status` 是 `ok` 或 `unknown` 時為 `false`，其他情況為 `true`。
 - **`needs_agent=true`** 時，結果必須交給 Agent 判斷。`cu-mcp` 不重試，也不降級到其他方法。
-- **`action`** 經由 MCP 仍回報 `unsupported`（不支援），不會送出任何事件。
+- **`action` 等輸入方法不經由 MCP 提供**：`tools/list` 不列出它們，`tools/call` 在執行 `cu-agent` 之前就以 `refused` 拒絕（不支援經由 MCP 輸入），不會送出任何事件。這個過濾與 ReachAgent 是否以 `--enable-input` 啟動無關；MCP 也不能啟用輸入。前景輸入只能由本機直接呼叫 `cu-agent`，見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「輸入模式」。
 - **`wrapper_error`** 表示 `cu-mcp` 無法取得有效的 `cu-agent` 回覆，例如程序無法啟動、逾時、回覆不是合法 JSON、回覆允許了操作，或方法需要的執行檔路徑沒有在啟動時指定。它不代表觀察成功或失敗的證據。
 
 ## 限制

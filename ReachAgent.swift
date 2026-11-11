@@ -6,7 +6,9 @@ import Foundation
 // line-based JSON protocol described in docs/AGENT-SERVICE.md. Window capture lives in
 // ReachAgentCapture.swift and runs only when `screen_recording` is granted. Accessibility
 // snapshots live in ReachAgentAccessibility.swift and run only when `accessibility` is granted.
-// The service posts no input event and asks for no permission at start-up.
+// The service asks for no permission at start-up. It posts no input event unless it was
+// started with --enable-input (ReachAgentInput.swift); only ReachAgentInputSystem.swift may
+// deliver an event, and that backend is unreachable in --test-mode, under CI and by default.
 
 let protocolVersion = 1
 let appVersion = "0.1.0"
@@ -40,6 +42,8 @@ protocol PermissionProvider {
 
 struct SystemPermissionProvider: PermissionProvider {
     let performsRequests = true
+    /// Present only when start-up authorized the system input backend.
+    var inputLaunch: SystemInputLaunch? = nil
 
     func current() -> [String: String] {
         func state(_ granted: Bool) -> String { granted ? "granted" : "denied" }
@@ -50,8 +54,12 @@ struct SystemPermissionProvider: PermissionProvider {
         ]
     }
 
-    /// Only called by an explicit `request_permissions`. `post_event` is never requested.
+    /// Only called by an explicit `request_permissions`. `post_event` reaches this only while
+    /// input is enabled (`parseRequested`), and is asked for only with the system input backend.
     func request(_ names: [String]) -> [String: String] {
+        if names.contains("post_event"), let launch = inputLaunch {
+            requestPostEventAccess(launch)
+        }
         if names.contains("accessibility") {
             let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
             _ = AXIsProcessTrustedWithOptions(options)
@@ -79,6 +87,7 @@ final class SelfTestPermissionProvider: PermissionProvider, @unchecked Sendable 
     private let lock = NSLock()
     private var screenRecordingState = "unknown"
     private var accessibilityState = "unknown"
+    private var postEventState = "unknown"
     var screenRecording: String {
         get { lock.lock(); defer { lock.unlock() }; return screenRecordingState }
         set { lock.lock(); screenRecordingState = newValue; lock.unlock() }
@@ -87,8 +96,12 @@ final class SelfTestPermissionProvider: PermissionProvider, @unchecked Sendable 
         get { lock.lock(); defer { lock.unlock() }; return accessibilityState }
         set { lock.lock(); accessibilityState = newValue; lock.unlock() }
     }
+    var postEvent: String {
+        get { lock.lock(); defer { lock.unlock() }; return postEventState }
+        set { lock.lock(); postEventState = newValue; lock.unlock() }
+    }
     func current() -> [String: String] {
-        ["accessibility": accessibility, "screen_recording": screenRecording, "post_event": "unknown"]
+        ["accessibility": accessibility, "screen_recording": screenRecording, "post_event": postEvent]
     }
     func request(_ names: [String]) -> [String: String] { current() }
 }
@@ -192,7 +205,7 @@ func isPlainInteger(_ value: Any?) -> Int? {
     return number.intValue >= 0 ? number.intValue : nil
 }
 
-func parseRequested(_ params: Any?) throws -> [String] {
+func parseRequested(_ params: Any?, inputEnabled: Bool = false) throws -> [String] {
     let list = (params as? [String: Any])?["permissions"] as? [Any]
     guard let list = list else {
         throw AgentError("invalid_params", "`permissions` must be an array")
@@ -211,7 +224,7 @@ func parseRequested(_ params: Any?) throws -> [String] {
         }
         requested.append(name)
     }
-    if requested.contains("post_event") {
+    if requested.contains("post_event") && !inputEnabled {
         throw AgentError("not_requestable", "post_event cannot be requested: input stays disabled")
     }
     return requested
@@ -247,13 +260,21 @@ func parseCaptureParams(_ params: Any?, includeOffscreen: Bool) throws -> Captur
 /// `screen_recording` being granted, and nothing is created before that.
 func handleCapture(
     _ id: String, _ object: [String: Any], includeOffscreen: Bool, provider: PermissionProvider,
-    backend: CaptureBackend
+    backend: CaptureBackend, input: InputController? = nil
 ) -> String {
     do {
         let request = try parseCaptureParams(object["params"], includeOffscreen: includeOffscreen)
         try requirePermission("screen_recording", in: provider.current())
+        // With input enabled, only a single-window `capture` can become the observation that
+        // an `action` names. Any capture first forgets the previous one.
+        input?.captureStarting()
         switch runBlocking(timeoutSeconds: captureTimeoutSeconds, { try await backend.capture(request) }) {
-        case .success(let report):
+        case .success(var report):
+            if let input = input, !includeOffscreen,
+                let sha = input.captureFinished(pid: request.pid, windowId: request.windowId, report: report)
+            {
+                report["image_sha256"] = sha
+            }
             return okLine(id, report)
         case .failure(let failure):
             return errorLine(id, AgentError("capture_failed", failure.description))
@@ -359,7 +380,7 @@ func handleAccessibility(
 /// One request line (without its newline) in, one response line out.
 func handleLine(
     _ line: String, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool
+    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil
 ) -> String {
     if line.utf8.count > maxLineBytes {
         return errorLine(nil, AgentError("invalid_json", "request line is too long"))
@@ -387,17 +408,20 @@ func handleLine(
     }
     switch method {
     case "describe":
-        return okLine(
-            id,
-            [
-                "app": "ReachAgent", "app_version": appVersion,
-                "protocol_version": protocolVersion, "methods": methods, "test_mode": testMode,
-            ])
+        var result: [String: Any] = [
+            "app": "ReachAgent", "app_version": appVersion,
+            "protocol_version": protocolVersion, "methods": methods, "test_mode": testMode,
+        ]
+        if let input = input {
+            result["methods"] = methods + inputMethods
+            result["input"] = input.describe()
+        }
+        return okLine(id, result)
     case "permissions":
         return okLine(id, provider.current())
     case "request_permissions":
         do {
-            let names = try parseRequested(object["params"] ?? [String: Any]())
+            let names = try parseRequested(object["params"] ?? [String: Any](), inputEnabled: input != nil)
             let asked = provider.performsRequests ? names : []
             return okLine(id, ["requested": asked, "permissions": provider.request(asked)])
         } catch let error as AgentError {
@@ -408,11 +432,13 @@ func handleLine(
     case "capture", "capture_all_windows":
         return handleCapture(
             id, object, includeOffscreen: method == "capture_all_windows", provider: provider,
-            backend: backend)
+            backend: backend, input: input)
     case "accessibility", "accessibility_subtree":
         return handleAccessibility(
             id, object, subtree: method == "accessibility_subtree", provider: provider,
             backend: axBackend)
+    case "action" where input != nil:
+        return handleAction(id, object, provider: provider, input: input!)
     default:
         return errorLine(id, AgentError("unknown_method", "unknown method `\(method)`"))
     }
@@ -492,7 +518,7 @@ func writeAll(_ fd: Int32, _ data: Data) -> Bool {
 
 func handleConnection(
     _ fd: Int32, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool
+    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil
 ) {
     var timeout = timeval(tv_sec: 30, tv_usec: 0)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
@@ -521,7 +547,7 @@ func handleConnection(
             if let line = String(data: lineData, encoding: .utf8) {
                 reply = handleLine(
                     line, provider: provider, backend: backend, axBackend: axBackend,
-                    testMode: testMode)
+                    testMode: testMode, input: input)
             } else {
                 reply = errorLine(nil, AgentError("invalid_json", "the request is not UTF-8"))
             }
@@ -552,7 +578,7 @@ func rejectTooLongLine(_ fd: Int32) {
 @discardableResult
 func serve(
     listenFd: Int32, provider: PermissionProvider, backend: CaptureBackend,
-    axBackend: AccessibilityBackend, testMode: Bool, maxConnections: Int?
+    axBackend: AccessibilityBackend, testMode: Bool, input: InputController? = nil, maxConnections: Int?
 ) -> Bool {
     var handled = 0
     while maxConnections == nil || handled < maxConnections! {
@@ -565,7 +591,8 @@ func serve(
             return false
         }
         handleConnection(
-            fd, provider: provider, backend: backend, axBackend: axBackend, testMode: testMode)
+            fd, provider: provider, backend: backend, axBackend: axBackend, testMode: testMode,
+            input: input)
         close(fd)
         handled += 1
     }
@@ -846,6 +873,161 @@ func selfTest() -> Never {
     }
 
     for failure in accessibilitySelfCheck() { failures.append("accessibility self-check: \(failure)") }
+    for failure in inputSelfCheck() { failures.append("input self-check: \(failure)") }
+
+    // `authorize` never yields a launch in test mode or without input. The CI check reads the
+    // real process environment, so the self-test cannot exercise it without taking the system
+    // path; tests/foreground_input_static.rs checks it statically instead, and lists every call.
+    check(SystemInputLaunch.authorize(enableInput: true, testMode: true) == nil,
+        "test mode never authorizes the system input backend")
+    check(SystemInputLaunch.authorize(enableInput: false, testMode: false) == nil,
+        "no --enable-input never authorizes the system input backend")
+    // The argument layer: `--enable-input` without `--test-mode` parses to the system path, and
+    // with `--test-mode` to the fake one. The self-test never builds the system path.
+    let armedArguments = [
+        "--serve", "--socket", "/tmp/x", "--enable-input", "--allow-bundle", fixtureBundleId,
+        "--input-ttl-seconds", "60", "--max-input-events", "1",
+    ]
+    let systemConfig = try? parseServeArguments(armedArguments)
+    check(systemConfig?.testMode == false && systemConfig?.input != nil,
+        "--enable-input without --test-mode parses to the system path")
+    if let testConfig = try? parseServeArguments(armedArguments + ["--test-mode"]) {
+        check(testConfig.testMode && testConfig.input != nil, "--test-mode --enable-input keeps the arming")
+        let made = try? makeInputController(testConfig)
+        check(made?.controller?.backendName == "fake" && made?.launch == nil, "--test-mode --enable-input uses the fake backend")
+        check(
+            (try? makeInputController(ServeConfig(socket: "/tmp/x", testMode: true, input: nil)))
+                .map { $0.controller == nil && $0.launch == nil } == true,
+            "without --enable-input there is no input controller")
+    } else {
+        failures.append("the test-mode input configuration did not parse")
+    }
+    check((try? parseRequested(["permissions": ["post_event"]], inputEnabled: true)) == ["post_event"],
+        "post_event is requestable only with input enabled")
+
+    // Input-enabled service on its own socket: fake input backend, fake capture, fake clock.
+    let inputSocket = directory + "/i"
+    var clock: UInt64 = 1_000
+    let clockLock = NSLock()
+    let fakeNow: () -> UInt64 = {
+        clockLock.lock()
+        defer { clockLock.unlock() }
+        return clock
+    }
+    let inputArming = InputArming(
+        InputOptions(bundles: [fixtureBundleId], keycodes: [18], ttlSeconds: 60, maxEvents: 2),
+        nowNs: 1_000, nowUnixSeconds: 1_700_000_000)!
+    let fakeInput = makeFakeInputController(arming: inputArming, now: fakeNow)
+    let inputProvider = SelfTestPermissionProvider()
+    inputProvider.screenRecording = "granted"
+    let inputDone = DispatchSemaphore(value: 0)
+    let evidence = directory + "/evidence"
+    let evidence2 = directory + "/evidence2"
+    let inputShot = directory + "/input.png"
+    let inputShot2 = directory + "/input2.png"
+    let inputAll = directory + "/input-all.png"
+    if let inputListener = try? makeListener(path: inputSocket) {
+        Thread.detachNewThread {
+            serve(
+                listenFd: inputListener, provider: inputProvider, backend: FakeCaptureBackend(),
+                axBackend: FakeAccessibilityBackend(), testMode: true, input: fakeInput.controller,
+                maxConnections: 3)
+            inputDone.signal()
+        }
+        let pre = clientExchange(
+            path: inputSocket,
+            lines: [
+                line(#"{"version":1,"id":"a","method":"describe"}"#),
+                line(#"{"version":1,"id":"b","method":"action","params":{}}"#),
+            ], expecting: 2)
+        if let r = pre {
+            let d = r[0]["result"] as? [String: Any]
+            let block = d?["input"] as? [String: Any]
+            check(d?["methods"] as? [String] == methods + ["action"], "describe lists action with input enabled")
+            check(block?["state"] as? String == "armed" && block?["backend"] as? String == "fake", "describe reports armed input")
+            check(block?["allowed_bundle_ids"] as? [String] == [fixtureBundleId] && block?["allowed_keycodes"] as? [Int] == [18],
+                "describe lists the allowed bundle ids and keycodes")
+            check(block?["events_remaining"] as? Int == 2 && block?["expires_unix_seconds"] as? Double == 1_700_000_060,
+                "describe reports the remaining events and the expiry")
+            let schema = r[1]["result"] as? [String: Any]
+            check(schema?["status"] as? String == "refused" && schema?["gate"] as? String == "schema", "empty action params are refused")
+        } else {
+            failures.append("input connection 1 failed")
+        }
+
+        // post_event unknown: a valid action is denied before the gate.
+        let sha2x2 = "0000000000000000000000000000000000000000000000000000000000000000"
+        func action(_ id: String, _ sha: String, _ dir: String, _ event: String = #"{"kind":"click","button":"left","x":1,"y":1}"#) -> Data {
+            line(#"{"version":1,"id":"\#(id)","method":"action","params":{"delivery":"foreground","target":{"bundle_id":"\#(fixtureBundleId)","pid":42,"window_id":7,"process_start_unix_seconds":1000.5},"observation":{"image_sha256":"\#(sha)"},"event":\#(event),"evidence_dir":"\#(dir)"}}"#)
+        }
+        let denied = clientExchange(path: inputSocket, lines: [action("c", sha2x2, evidence)], expecting: 1)
+        check(denied.map { code($0[0]) } == "permission_denied", "action needs post_event")
+        check(!FileManager.default.fileExists(atPath: evidence), "a denied action writes nothing")
+
+        inputProvider.postEvent = "granted"
+        let capture = clientExchange(
+            path: inputSocket,
+            lines: [
+                line(#"{"version":1,"id":"d","method":"capture","params":{"pid":42,"window_id":7,"image":"\#(inputShot)"}}"#)
+            ], expecting: 1)
+        let sha = (capture?[0]["result"] as? [String: Any])?["image_sha256"] as? String ?? ""
+        check(sha.count == 64 && sha == fileSha256(inputShot), "capture reports the hash of its own file with input enabled")
+        // Connection 3 was the last one; the remaining checks call handleLine directly.
+        func call(_ data: Data) -> [String: Any] {
+            let text = String(data: data, encoding: .utf8)!
+            let reply = handleLine(
+                text, provider: inputProvider, backend: FakeCaptureBackend(), axBackend: FakeAccessibilityBackend(),
+                testMode: true, input: fakeInput.controller)
+            return (try? JSONSerialization.jsonObject(with: Data(reply.utf8))) as? [String: Any] ?? [:]
+        }
+        func outcome(_ reply: [String: Any]) -> String {
+            let r = reply["result"] as? [String: Any]
+            return "\(r?["status"] as? String ?? "?")/\(r?["gate"] as? String ?? "-")/\(r?["reason"] as? String ?? "-")"
+        }
+        check(outcome(call(action("e", sha2x2, evidence))) == "refused/G5/observation_mismatch",
+            "an observation that is not the latest capture is refused")
+        let posted = call(action("f", sha, evidence))
+        check(outcome(posted) == "posted_unverified/-/-", "a click on the captured fixture window is posted to the fake backend")
+        check((posted["result"] as? [String: Any])?["action_allowed"] as? Bool == false, "the action reply never allows actions")
+        check(fakeInput.fake.events == ["down 1.0 1.0", "up 1.0 1.0"], "the fake backend recorded one press and one release")
+        for name in ["attempt.json", "result.json"] {
+            check(stat(evidence + "/" + name, &info) == 0 && (info.st_mode & 0o777) == 0o600, "\(name) is written with mode 0600")
+        }
+        check(stat(evidence, &info) == 0 && (info.st_mode & 0o777) == 0o700, "the evidence directory has mode 0700")
+        check(outcome(call(action("f", sha, evidence))) == "refused/G13/request_already_executed", "a replay through the socket is refused")
+        check(outcome(call(action("g", sha, evidence2))) == "refused/G5/observation_already_used", "a spent observation is refused")
+        // A new capture writes the same synthetic image, so its hash is spent too.
+        _ = call(line(#"{"version":1,"id":"h","method":"capture_all_windows","params":{"pid":42,"window_id":7,"image":"\#(inputAll)"}}"#))
+        check(outcome(call(action("i", sha, evidence2))) == "refused/G5/observation_already_used",
+            "capture_all_windows does not create an observation")
+        _ = call(line(#"{"version":1,"id":"j","method":"capture","params":{"pid":42,"window_id":7,"image":"\#(inputShot2)"}}"#))
+        check(outcome(call(action("k", sha, evidence2, #"{"kind":"key_tap","keycode":49}"#))) == "refused/G5/observation_already_used",
+            "the identical synthetic capture is still spent")
+        clockLock.lock()
+        clock = 1_000 + 61_000_000_000
+        clockLock.unlock()
+        let late = call(line(#"{"version":1,"id":"l","method":"describe"}"#))
+        let lateBlock = (late["result"] as? [String: Any])?["input"] as? [String: Any]
+        check(lateBlock?["state"] as? String == "disabled" && lateBlock?["events_remaining"] as? Int == 1,
+            "describe reports the expired arming as disabled")
+        check(outcome(call(action("m", sha, evidence2))) == "refused/G1/arming_expired", "an expired arming refuses through the service")
+        check(fakeInput.fake.events.count == 2, "only the one accepted click reached the fake backend")
+        check(!FileManager.default.fileExists(atPath: evidence2), "refused actions write no receipt")
+        check(inputDone.wait(timeout: .now() + 10) == .success, "the input service stopped after three connections")
+        close(inputListener)
+    } else {
+        failures.append("cannot listen on the input socket")
+    }
+    for path in [evidence + "/attempt.json", evidence + "/result.json", inputShot, inputShot2, inputAll, inputSocket] {
+        unlink(path)
+    }
+    rmdir(evidence)
+
+    // Without --enable-input `action` stays an unknown method and post_event is not requestable.
+    let plainAction = handleLine(
+        #"{"version":1,"id":"n","method":"action","params":{}}"#, provider: provider, backend: FakeCaptureBackend(),
+        axBackend: FakeAccessibilityBackend(), testMode: true)
+    check(plainAction.contains("\"unknown_method\""), "action is an unknown method without --enable-input")
 
     check(done.wait(timeout: .now() + 10) == .success, "service stopped after six connections")
     close(listener)
@@ -855,7 +1037,7 @@ func selfTest() -> Never {
     check(rmdir(directory) == 0, "temporary directory removed")
 
     if failures.isEmpty {
-        print("ReachAgent self-test passed; no screen capture, no accessibility read, no permission prompt, no input")
+        print("ReachAgent self-test passed; no screen capture, no accessibility read, no permission prompt, no input event (fake input backend only)")
         exit(0)
     }
     for failure in failures { fputs("self-test failed: \(failure)\n", stderr) }
@@ -864,9 +1046,42 @@ func selfTest() -> Never {
 
 // MARK: - Entry point
 
-func usage() -> Never {
-    fputs("usage: ReachAgent --self-test | --serve --socket <absolute path> [--test-mode]\n", stderr)
+func usage(_ problem: String? = nil) -> Never {
+    if let problem = problem { fputs("ReachAgent: \(problem)\n", stderr) }
+    fputs(
+        """
+        usage: ReachAgent --self-test
+               ReachAgent --serve --socket <absolute path> [--test-mode]
+                   [--enable-input --allow-bundle <bundle id>... [--allow-keycode <18|23|36|38|44|49>...]
+                    --input-ttl-seconds <1-600> --max-input-events <1-20>]
+        Input is disabled unless --enable-input is given. Allowed bundle ids: \(approvedInputBundleIds.joined(separator: ", ")).
+
+        """, stderr)
     exit(2)
+}
+
+/// The input controller for `--serve`, or nil when input is not enabled. The system backend
+/// is used only when `SystemInputLaunch.authorize` allows it; `--test-mode` gets the fake
+/// backend, and under CI start-up fails.
+func makeInputController(_ config: ServeConfig) throws -> (
+    controller: InputController?, launch: SystemInputLaunch?
+) {
+    guard let options = config.input else { return (nil, nil) }
+    guard let arming = InputArming(options, nowNs: monotonicNs(), nowUnixSeconds: Date().timeIntervalSince1970)
+    else {
+        throw AgentError("invalid_arming", "the input options are outside the approved limits")
+    }
+    if config.testMode {
+        return (makeFakeInputController(arming: arming, now: monotonicNs).controller, nil)
+    }
+    guard let launch = SystemInputLaunch.authorize(enableInput: true, testMode: false) else {
+        throw AgentError("input_unavailable", "--enable-input without --test-mode is refused under CI")
+    }
+    let system = makeSystemInputBackend(launch)
+    let controller = InputController(
+        arming: arming, backendName: "system", sampler: system.sampler, poster: system.poster,
+        sink: FileReceiptSink(), now: monotonicNs)
+    return (controller, launch)
 }
 
 @main
@@ -874,25 +1089,29 @@ struct ReachAgent {
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
         if args == ["--self-test"] { selfTest() }
-        guard args.first == "--serve", args.count >= 3, args[1] == "--socket" else { usage() }
-        let path = args[2]
-        let rest = Array(args.dropFirst(3))
-        guard rest.isEmpty || rest == ["--test-mode"] else { usage() }
-        let testMode = rest == ["--test-mode"]
+        let config: ServeConfig
+        do {
+            config = try parseServeArguments(args)
+        } catch {
+            usage("\(error)")
+        }
+        let testMode = config.testMode
         signal(SIGPIPE, SIG_IGN)
         do {
-            let listener = try makeListener(path: path)
-            let provider: PermissionProvider = testMode ? TestPermissionProvider() : SystemPermissionProvider()
+            let input = try makeInputController(config)
+            let listener = try makeListener(path: config.socket)
+            let provider: PermissionProvider =
+                testMode ? TestPermissionProvider() : SystemPermissionProvider(inputLaunch: input.launch)
             let backend: CaptureBackend = testMode ? FakeCaptureBackend() : SystemCaptureBackend()
             let axBackend: AccessibilityBackend =
                 testMode ? FakeAccessibilityBackend() : SystemAccessibilityBackend()
             if !testMode { prepareScreenCapture() }
             let stoppedNormally = serve(
                 listenFd: listener, provider: provider, backend: backend, axBackend: axBackend,
-                testMode: testMode, maxConnections: nil)
+                testMode: testMode, input: input.controller, maxConnections: nil)
             if !stoppedNormally {
                 close(listener)
-                unlink(path)
+                unlink(config.socket)
                 exit(1)
             }
         } catch let error as AgentError {
