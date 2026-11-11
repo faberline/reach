@@ -52,10 +52,10 @@ func makeSystemInputBackend(_ launch: SystemInputLaunch) -> (sampler: InputSampl
 /// `modifiersReleased(flags:)` and `mouseButtonsReleased(_:)` in ReachAgentInput.swift.
 /// It is deliberately NOT called from `liveFacts` yet: both facts stay fail-closed until I-4
 /// wires every sample in at once and verifies it on a real machine.
-func sampleHeldInput() -> (modifiersReleased: Bool, mouseButtonsReleased: Bool) {
+func sampleHeldInput() -> (modifiersReleased: Bool, capsLockOff: Bool, mouseButtonsReleased: Bool) {
     let flags = CGEventSource.flagsState(.hidSystemState).rawValue
     let down = [CGMouseButton.left, .right, .center].map { CGEventSource.buttonState(.hidSystemState, button: $0) }
-    return (modifiersReleased(flags: flags), mouseButtonsReleased(down))
+    return (modifiersReleased(flags: flags), capsLockOff(flags: flags), mouseButtonsReleased(down))
 }
 
 private final class SystemInputBackend: InputSampler, EventPoster {

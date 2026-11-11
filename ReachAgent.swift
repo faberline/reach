@@ -894,7 +894,8 @@ func selfTest() -> Never {
             line(#"{"version":1,"id":"j","method":"input_source","params":{"select":"x"}}"#),
             line(#"{"version":1,"id":"k","method":"pointer_location","params":[]}"#),
             line(#"{"version":1,"id":"l","method":"bundle_windows","params":{"bundle_id":""}}"#),
-        ], expecting: 12)
+            line(#"{"version":1,"id":"m","method":"bundle_windows","params":{"bundle_id":"\#(FakeObservationBackend.partialBundleId)"}}"#),
+        ], expecting: 13)
     if let r = seventh {
         for (index, reply) in r.prefix(5).enumerated() {
             let result = reply["result"] as? [String: Any]
@@ -920,6 +921,13 @@ func selfTest() -> Never {
         check(windows?.map { $0["layer"] as? Int } == [0, 20], "bundle_windows reports the layers")
         check((windows?.last?["bounds"] as? [String: Any])?["width"] as? Double == 240, "bundle_windows reports the bounds")
         check(fixture?["window_titles"] as? String == "not_read", "bundle_windows reads no titles")
+        check(fixture?["skipped"] as? Int == 0, "bundle_windows reports no skipped windows for the fixture")
+        check(windows?.allSatisfy { $0["alpha"] as? Double == 1 } == true, "bundle_windows reports the alpha it read")
+        let partial = r[12]["result"] as? [String: Any]
+        let partialWindows = partial?["windows"] as? [[String: Any]]
+        check(partial?["skipped"] as? Int == 2, "bundle_windows counts the skipped windows")
+        check(partialWindows?.count == 1 && partialWindows?.first?["alpha"] is NSNull,
+            "a missing alpha is null, not an invented 1")
         let empty = r[4]["result"] as? [String: Any]
         check((empty?["windows"] as? [Any])?.isEmpty == true && (empty?["owner_pids"] as? [Any])?.isEmpty == true,
             "an app that is not running has no windows")

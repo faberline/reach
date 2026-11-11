@@ -510,7 +510,7 @@ mod agent_route {
             "windows": [{"window_id": 7, "owner_pid": 42, "layer": 0, "alpha": 1.0,
                          "z_index": 0,
                          "bounds": {"x": 0.0, "y": 25.0, "width": 800.0, "height": 600.0}}],
-            "truncated": false, "window_scope": "onscreen_only", "window_titles": "not_read",
+            "truncated": false, "skipped": 0, "window_scope": "onscreen_only", "window_titles": "not_read",
             "backend": "fake", "scope": "read_only_unverified", "action_allowed": false,
             "used_by_input_gate": false});
         let d = short_dir();

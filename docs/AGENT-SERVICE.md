@@ -111,11 +111,12 @@ target/debug/ReachAgent --serve --socket <絕對路徑> [--test-mode] \
 - `input_source`：`input_source_id`、`input_mode_id`、`localized_name`、`source_type`（後三個可為 `null`），以及固定 `false` 的 `selection_changed`。系統後端呼叫 `TISCopyCurrentKeyboardInputSource` 並讀其屬性，只在主執行緒讀。
 - `secure_input`：`secure_event_input_enabled`（`IsSecureEventInputEnabled`）。
 - `pointer_location`：`x`、`y`（有限數）與 `coordinate_space`（`global_top_left_points`）。系統後端讀 `NSEvent.mouseLocation`，再以主螢幕高度翻成左上原點，與視窗 bounds 同一座標系。
-- `bundle_windows`：`bundle_id`、`owner_pids`（最多 8 個）、`windows`（最多 64 個，每個有 `window_id`、`owner_pid`、`layer`、`bounds`、`alpha`、`z_index`）、`truncated`、`window_scope`（`onscreen_only`）、`window_titles`（`not_read`）。系統後端讀 `CGWindowListCopyWindowInfo`（只取螢幕上的視窗、不含桌面元素），每次呼叫都以 `NSRunningApplication(processIdentifier:)` 比對擁有者的 bundle id；`z_index` 是在整份螢幕視窗清單中由前到後的位置。
+- `bundle_windows`：`bundle_id`、`owner_pids`（最多 8 個）、`windows`（最多 64 個，每個有 `window_id`、`owner_pid`、`layer`、`bounds`、`alpha`、`z_index`）、`truncated`、`window_scope`（`onscreen_only`）、`window_titles`（`not_read`）、`skipped`（屬於該 bundle、但因視窗清單項目缺少 window number、layer 或 bounds 而被略過的視窗數；不再靜默略過）。每個視窗的 `alpha` 在視窗清單沒有提供時為 `null`，不會捏造成 1。系統後端讀 `CGWindowListCopyWindowInfo`（只取螢幕上的視窗、不含桌面元素），每次呼叫都以 `NSRunningApplication(processIdentifier:)` 比對擁有者的 bundle id；`z_index` 是在整份螢幕視窗清單中由前到後的位置。
 - 後端讀不到時回 `observation_failed`。
-- `--test-mode` 與 `--self-test` 只用假後端：固定的輸入來源、`secure_event_input_enabled: false`、指標 (100.5, 200.25)；fixture bundle id 有一個行程（pid 42）與 layer 0、layer 20 各一個視窗，`org.local.reach.fake-failure` 會失敗，其他 bundle id 沒有視窗。不呼叫任何系統 API。
+- `--test-mode` 與 `--self-test` 只用假後端：固定的輸入來源、`secure_event_input_enabled: false`、指標 (100.5, 200.25)；fixture bundle id 有一個行程（pid 42）與 layer 0、layer 20 各一個視窗，`org.local.reach.fake-partial` 回一個 `alpha: null` 的視窗與 `skipped: 2`，`org.local.reach.fake-failure` 會失敗，其他 bundle id 沒有視窗。不呼叫任何系統 API。
 - **閘門不使用這些讀值**：系統輸入後端的即時事實仍失敗即關閉（G7 至 G9 一律拒絕）。接進閘門要等 I-4 實機驗證。
 - **實機未驗證**：系統後端的四個讀值都還沒在實機上與 fixture 對照驗證（座標翻轉在多螢幕下、輸入法 id 的值、安全輸入在其他 App 開啟時、視窗清單的 layer 與 z 順序）。結果只是觀察，不授權任何操作。
+- **實機未驗證（讀值可能過時）**：服務的主執行緒停在 `accept()`、不跑 run loop，`input_source` 讀到的目前輸入來源在切換輸入法之後可能還是舊值。實機驗證時要先切換輸入法，再讀一次比對。
 - Rust 端的 `check_observation_result` 核對結果（含 `bundle_windows` 與請求的 bundle id 一致、上限與固定欄位）。
 
 ## 錯誤碼

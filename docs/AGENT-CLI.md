@@ -105,7 +105,7 @@ printf '%s\n' '{"id":"src-1","method":"input_source"}' | target/debug/cu-agent
 printf '%s\n' '{"id":"win-1","method":"bundle_windows","bundle_id":"com.apple.Safari"}' | target/debug/cu-agent
 ```
 
-- 成功為 `ok`、狀態碼 0，`result` 是 App 的報告原樣（欄位見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「唯讀觀測」），`cu-agent` 用 `check_observation_result` 核對；`scope` 固定 `read_only_unverified`，`used_by_input_gate` 固定 `false`。
+- 成功為 `ok`、狀態碼 0，`result` 是 App 的報告原樣（欄位見 [AGENT-SERVICE.md](AGENT-SERVICE.md) 的「唯讀觀測」），`cu-agent` 用 `check_observation_result` 核對；`bundle_windows` 的 `skipped` 是因缺少 window number、layer 或 bounds 而略過的視窗數（必須是非負整數），視窗的 `alpha` 缺值時為 `null`；`scope` 固定 `read_only_unverified`，`used_by_input_gate` 固定 `false`。
 - 它們不需要任何權限、不彈窗；不切換輸入來源、不移動指標、不讀視窗標題。帶 `select`、`x`、`y` 之類的欄位一律在連線前拒絕。
 - App 沒有執行時同樣是 `agent_unavailable`、`fallback: "none"`，不會直接讀系統狀態。
 - 前景輸入的閘門不使用這些讀值（G7 至 G9 仍失敗即關閉），接上要等 I-4 實機驗證。系統後端的讀值**實機未驗證**。

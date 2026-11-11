@@ -72,6 +72,7 @@ fn live() -> LiveFacts {
         focus_unchanged: true,
         hid_idle: true,
         modifiers_released: true,
+        caps_lock_off: true,
         mouse_buttons_released: true,
         secure_input_off: true,
         input_source_ok: true,
@@ -680,8 +681,7 @@ fn g9_held_input_decisions() {
     // Plan review R2: each modifier bit refuses; other bits do not.
     assert!(modifiers_released(0));
     for bit in [
-        0x0001_0000u64,
-        0x0002_0000,
+        0x0002_0000u64,
         0x0004_0000,
         0x0008_0000,
         0x0010_0000,
@@ -692,6 +692,11 @@ fn g9_held_input_decisions() {
     }
     // Numeric pad and the non-coalesced bit are not held modifiers.
     assert!(modifiers_released(0x0020_0000 | 0x100));
+    // P31-3: Caps Lock is its own reason, alone or with other bits.
+    assert!(caps_lock_off(0) && caps_lock_off(0x0002_0000 | 0x100));
+    assert!(!caps_lock_off(CAPS_LOCK_FLAG) && !caps_lock_off(CAPS_LOCK_FLAG | 0x0002_0000));
+    assert!(modifiers_released(CAPS_LOCK_FLAG));
+    assert!(!modifiers_released(CAPS_LOCK_FLAG | 0x0002_0000));
     assert!(mouse_buttons_released(&[]));
     assert!(mouse_buttons_released(&[false, false, false]));
     assert!(!mouse_buttons_released(&[true, false, false]));
@@ -702,12 +707,13 @@ fn g9_held_input_decisions() {
 fn g7_to_g9_live_conditions_each_refuse() {
     let now = Instant::now();
     type Mutation = fn(&mut LiveFacts);
-    let cases: [(&str, &str, Mutation); 8] = [
+    let cases: [(&str, &str, Mutation); 9] = [
         ("G7", "point_occluded", |l| l.point_unoccluded = false),
         ("G8", "target_not_frontmost", |l| l.target_frontmost = false),
         ("G8", "focus_changed", |l| l.focus_unchanged = false),
         ("G9", "hid_not_idle", |l| l.hid_idle = false),
         ("G9", "modifier_held", |l| l.modifiers_released = false),
+        ("G9", "caps_lock_on", |l| l.caps_lock_off = false),
         ("G9", "mouse_button_down", |l| {
             l.mouse_buttons_released = false
         }),

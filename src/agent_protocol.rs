@@ -750,6 +750,9 @@ fn check_bundle_windows(
     if !object.get("truncated").is_some_and(Value::is_boolean) {
         return Err("truncated: must be a boolean".to_string());
     }
+    if object.get("skipped").and_then(Value::as_u64).is_none() {
+        return Err("skipped: must be a non-negative integer".to_string());
+    }
     let owners: Vec<i64> = match object.get("owner_pids").and_then(Value::as_array) {
         Some(list) if list.len() <= MAX_OBSERVED_PROCESSES => list
             .iter()
@@ -788,7 +791,10 @@ fn check_bundle_windows(
         if window.get("z_index").and_then(Value::as_u64).is_none() {
             return Err("windows.z_index: must be a non-negative integer".to_string());
         }
-        finite_number(window, "alpha").map_err(|e| format!("windows.{e}"))?;
+        // A window list entry without an alpha value is reported as null (plan review P30-3).
+        if !window.get("alpha").is_some_and(Value::is_null) {
+            finite_number(window, "alpha").map_err(|e| format!("windows.{e}"))?;
+        }
         let bounds = window
             .get("bounds")
             .and_then(Value::as_object)
@@ -1306,7 +1312,8 @@ mod tests {
         let windows = with_common(json!({"bundle_id": "a.b", "owner_pids": [42],
             "windows": [{"window_id": 8, "owner_pid": 42, "layer": 20, "alpha": 1.0, "z_index": 1,
                          "bounds": {"x": 120.0, "y": 300.0, "width": 240.0, "height": 40.0}}],
-            "truncated": false, "window_scope": "onscreen_only", "window_titles": "not_read"}));
+            "truncated": false, "skipped": 0, "window_scope": "onscreen_only",
+            "window_titles": "not_read"}));
         let cases = [
             (Method::InputSource, &source),
             (Method::SecureInput, &secure),
@@ -1379,6 +1386,8 @@ mod tests {
                 json!(vec![1; 9]),
             ),
             (Method::BundleWindows, &windows, "truncated", json!(null)),
+            (Method::BundleWindows, &windows, "skipped", json!(null)),
+            (Method::BundleWindows, &windows, "skipped", json!(-1)),
         ] {
             let mut broken = report.clone();
             broken[field] = value;
@@ -1395,7 +1404,7 @@ mod tests {
             ("window_id", json!(0)),
             ("layer", json!("20")),
             ("z_index", json!(-1)),
-            ("alpha", json!(null)),
+            ("alpha", json!("1")),
             ("bounds", json!({"x": 0.0, "y": 0.0, "width": 1.0})),
         ] {
             let mut broken = windows.clone();
@@ -1404,6 +1413,11 @@ mod tests {
                 .expect_err(field);
             assert!(err.contains(field), "{field}: {err}");
         }
+        // A missing alpha (null) and skipped windows are valid reports.
+        let mut partial = windows.clone();
+        partial["windows"][0]["alpha"] = json!(null);
+        partial["skipped"] = json!(2);
+        assert!(check_observation_result(Method::BundleWindows, Some("a.b"), &partial).is_ok());
         assert!(check_observation_result(Method::BundleWindows, None, &windows).is_err());
         assert!(check_observation_result(Method::Capture, None, &secure).is_err());
         assert!(check_observation_result(Method::SecureInput, None, &json!([])).is_err());
